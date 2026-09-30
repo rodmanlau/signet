@@ -1,0 +1,4 @@
+.valar/
+node_modules/
+dist/
+*.tsbuildinfo
