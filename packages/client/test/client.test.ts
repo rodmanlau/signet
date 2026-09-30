@@ -3,15 +3,15 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { keygenAsync as generateKeyPair } from '@noble/ed25519'
-import { signProof, verifyProof } from '@signet/proof'
+import { signProof, verifyProof } from '@agenticage/proof'
 import { expect, it } from 'vitest'
 import { agentSubject, deriveIdentity } from '../../server/src/identity.js'
 import { startLogin } from '../../server/src/main.js'
 import { runSignetClient } from '../src/run.js'
 
 const USAGE = [
-  'npm start -w @signet/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
-  'npm start -w @signet/client -- --human <signet-origin> <audience> <public-key-file>',
+  'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
+  'npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>',
 ]
 
 async function freePort(): Promise<number> {

@@ -25,7 +25,7 @@ try {
   process.exit(1)
 }
 
-const child = spawn('npm', ['run', 'start', '-w', '@signet/server'], {
+const child = spawn('npm', ['run', 'start', '-w', '@agenticage/server'], {
   cwd: repoRoot,
   env,
   stdio: 'inherit',

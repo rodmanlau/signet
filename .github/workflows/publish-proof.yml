@@ -1,4 +1,4 @@
-name: Publish @signet/proof
+name: Publish @agenticage/proof
 on:
   push:
     tags:
@@ -22,5 +22,5 @@ jobs:
         run: |
           node --input-type=module -e "import {readFileSync} from 'node:fs'; const version = JSON.parse(readFileSync('packages/proof/package.json','utf8')).version; if (process.env.GITHUB_REF !== 'refs/tags/v' + version) { console.error('tag is not v' + version); process.exit(1) }"
       - run: npm test
-      - run: npm run build -w @signet/proof
-      - run: npm publish -w @signet/proof --access public
+      - run: npm run build -w @agenticage/proof
+      - run: npm publish -w @agenticage/proof --access public

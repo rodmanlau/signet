@@ -12,19 +12,19 @@ const repoRoot = fileURLToPath(new URL('../../..', import.meta.url))
 it('packs javascript, keeps the SHA-512 import, and has no install script', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'signet-pack-'))
   try {
-    await execFileAsync('npm', ['run', 'build', '-w', '@signet/proof'], { cwd: repoRoot, shell: true })
+    await execFileAsync('npm', ['run', 'build', '-w', '@agenticage/proof'], { cwd: repoRoot, shell: true })
     for (const name of ['verify.js', 'sign.js', 'agent.js']) {
       const source = await readFile(join(repoRoot, 'packages', 'proof', 'dist', name), 'utf8')
       expect(source).toContain("import './ed25519.js'")
     }
     const { stdout } = await execFileAsync(
       'npm',
-      ['pack', '-w', '@signet/proof', '--pack-destination', dir, '--json'],
+      ['pack', '-w', '@agenticage/proof', '--pack-destination', dir, '--json'],
       { cwd: repoRoot, shell: true },
     )
     const packed = JSON.parse(stdout) as { filename: string; files: { path: string }[] }[]
     const filename = packed[0].filename
-    expect(filename).toBe('signet-proof-0.1.0.tgz')
+    expect(filename).toBe('agenticage-proof-0.1.0.tgz')
     const paths = packed[0].files.map((file) => file.path)
     expect(paths).toContain('dist/index.js')
     expect(paths).toContain('dist/ed25519.js')
@@ -44,15 +44,15 @@ it('packs javascript, keeps the SHA-512 import, and has no install script', asyn
 it('rebuilds proof after the tests and before publish', async () => {
   const workflow = await readFile(join(repoRoot, '.github', 'workflows', 'publish-proof.yml'), 'utf8')
   const testAt = workflow.indexOf('npm test')
-  const buildAt = workflow.indexOf('npm run build -w @signet/proof')
-  const publishAt = workflow.indexOf('npm publish -w @signet/proof --access public')
+  const buildAt = workflow.indexOf('npm run build -w @agenticage/proof')
+  const publishAt = workflow.indexOf('npm publish -w @agenticage/proof --access public')
   expect(testAt).toBeGreaterThanOrEqual(0)
   expect(buildAt).toBeGreaterThan(testAt)
   expect(publishAt).toBeGreaterThan(buildAt)
 })
 
 it('refuses to publish the server and the client', async () => {
-  for (const name of ['@signet/server', '@signet/client']) {
+  for (const name of ['@agenticage/server', '@agenticage/client']) {
     const result = await execFileAsync('npm', ['publish', '-w', name, '--dry-run', '--json'], {
       cwd: repoRoot,
       shell: true,

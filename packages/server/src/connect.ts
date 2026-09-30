@@ -1,4 +1,4 @@
-import { agentRequestOk, signProof } from '@signet/proof'
+import { agentRequestOk, signProof } from '@agenticage/proof'
 import { agentSubject, deriveIdentity } from './identity.js'
 import type { ProviderName } from './identity.js'
 

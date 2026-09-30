@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { getPublicKey } from '@noble/ed25519'
-import '@signet/proof'
+import '@agenticage/proof'
 import type { ProviderName } from './identity.js'
 import { connectingText, decideAgentProof, decideConnect, type LoginSession } from './connect.js'
 
@@ -99,7 +99,7 @@ export async function startLogin(
   const sessionsFile = (options.sessionsFile ?? process.env.SIGNET_SESSIONS ?? '').trim()
   if (sessionsFile === '') throw new Error('SIGNET_SESSIONS is required')
   const sessions = await loadSessions(sessionsFile)
-  // Sync getPublicKey needs SHA-512. Importing @signet/proof wires it.
+  // Sync getPublicKey needs SHA-512. Importing @agenticage/proof wires it.
   const derived = getPublicKey(options.privateKey)
   if (options.publicKey && !sameBytes(options.publicKey, derived)) {
     throw new Error('public key does not match private key')

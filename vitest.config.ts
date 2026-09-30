@@ -6,7 +6,7 @@ export default defineConfig({
   test: { include: ['packages/*/test/**/*.test.ts'] },
   resolve: {
     alias: {
-      '@signet/proof': fileURLToPath(new URL('./packages/proof/src/index.ts', import.meta.url)),
+      '@agenticage/proof': fileURLToPath(new URL('./packages/proof/src/index.ts', import.meta.url)),
     },
   },
 })

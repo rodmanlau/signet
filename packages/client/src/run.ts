@@ -1,11 +1,11 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } from '@signet/proof'
+import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } from '@agenticage/proof'
 
 const USAGE = [
-  'npm start -w @signet/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
-  'npm start -w @signet/client -- --human <signet-origin> <audience> <public-key-file>',
+  'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
+  'npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>',
 ]
 
 const PAGE = `<!DOCTYPE html>

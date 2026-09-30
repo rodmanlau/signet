@@ -1,5 +1,5 @@
 {
-  "name": "@signet/client",
+  "name": "@agenticage/client",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,7 +8,7 @@
     "start": "tsx src/main.ts"
   },
   "dependencies": {
-    "@signet/proof": "*"
+    "@agenticage/proof": "*"
   },
   "devDependencies": {
     "@noble/ed25519": "^3.2.0",

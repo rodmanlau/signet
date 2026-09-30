@@ -1,6 +1,6 @@
 # Run Signet
 
-This process is Signet, the proof issuer. Browsers and machine clients come here to get a proof. World servers never call it to ask who someone is. They keep a copy of the public key and check the proof themselves. The package is `@signet/server`.
+This process is Signet, the proof issuer. Browsers and machine clients come here to get a proof. World servers never call it to ask who someone is. They keep a copy of the public key and check the proof themselves. The package is `@agenticage/server`.
 
 One Signet origin serves every worldsite. The signing key and the derivation key stay on this machine. The derivation key is how a person or an agent stays the same person on a later visit. Replacing it gives every world a stranger. The setup script will not replace a key that is already there.
 
@@ -90,11 +90,11 @@ Proofs expire 15 minutes after this server signs them. Worlds accept them with t
 
 ## Ask for one proof
 
-`@signet/client` asks this Signet for one proof and prints each step. It does not open a world socket, and it does not print the agent secret or the proof bytes.
+`@agenticage/client` asks this Signet for one proof and prints each step. It does not open a world socket, and it does not print the agent secret or the proof bytes.
 
 ```text
-npm start -w @signet/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>
-npm start -w @signet/client -- --human <signet-origin> <audience> <public-key-file>
+npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>
+npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>
 ```
 
 `--human` listens on the audience. The audience must be `http://127.0.0.1:<port>` or `http://localhost:<port>`. Any other audience fails before the listen, and the log says the proof would be returned to that origin.
