@@ -1,0 +1,18 @@
+{
+  "name": "@signet/server",
+  "private": true,
+  "type": "module",
+  "exports": "./src/connect.ts",
+  "scripts": {
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.2.0",
+    "@noble/hashes": "^2.4.0",
+    "@signet/proof": "*",
+    "tldts": "^7.4.15"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5"
+  }
+}
