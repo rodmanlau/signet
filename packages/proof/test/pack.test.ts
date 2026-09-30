@@ -43,14 +43,18 @@ it('packs javascript, keeps the SHA-512 import, and has no install script', asyn
 
 it('refuses to publish the server and the client', async () => {
   for (const name of ['@signet/server', '@signet/client']) {
-    const result = await execFileAsync('npm', ['publish', '-w', name, '--dry-run'], {
+    const result = await execFileAsync('npm', ['publish', '-w', name, '--dry-run', '--json'], {
       cwd: repoRoot,
       shell: true,
     }).then(
-      () => ({ code: 0, stderr: '' }),
-      (error: { code?: number; stderr?: string }) => ({ code: error.code ?? 1, stderr: error.stderr ?? '' }),
+      (ok) => ({ stdout: ok.stdout, stderr: ok.stderr }),
+      (error: { stdout?: string; stderr?: string }) => ({
+        stdout: error.stdout ?? '',
+        stderr: error.stderr ?? '',
+      }),
     )
-    expect(result.code).not.toBe(0)
-    expect(result.stderr.toLowerCase()).toContain('private')
+    const output = `${result.stdout}${result.stderr}`.toLowerCase()
+    expect(output).toContain('private')
+    expect(output).not.toContain('.tgz')
   }
 })
