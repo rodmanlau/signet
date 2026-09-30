@@ -41,6 +41,16 @@ it('packs javascript, keeps the SHA-512 import, and has no install script', asyn
   }
 })
 
+it('rebuilds proof after the tests and before publish', async () => {
+  const workflow = await readFile(join(repoRoot, '.github', 'workflows', 'publish-proof.yml'), 'utf8')
+  const testAt = workflow.indexOf('npm test')
+  const buildAt = workflow.indexOf('npm run build -w @signet/proof')
+  const publishAt = workflow.indexOf('npm publish -w @signet/proof --access public')
+  expect(testAt).toBeGreaterThanOrEqual(0)
+  expect(buildAt).toBeGreaterThan(testAt)
+  expect(publishAt).toBeGreaterThan(buildAt)
+})
+
 it('refuses to publish the server and the client', async () => {
   for (const name of ['@signet/server', '@signet/client']) {
     const result = await execFileAsync('npm', ['publish', '-w', name, '--dry-run', '--json'], {
