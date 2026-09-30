@@ -1,0 +1,16 @@
+{
+  "name": "@signet/client",
+  "private": true,
+  "type": "module",
+  "exports": "./src/run.ts",
+  "scripts": {
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@signet/proof": "*"
+  },
+  "devDependencies": {
+    "@noble/ed25519": "^3.2.0",
+    "tsx": "^4.20.5"
+  }
+}
