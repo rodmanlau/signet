@@ -4,7 +4,7 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "test": "vitest run"
+    "test": "npm run build -w @signet/proof && vitest run"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

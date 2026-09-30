@@ -1,0 +1,25 @@
+name: Publish @signet/proof
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - run: npm ci
+      - name: Require the tag to match the package version
+        shell: bash
+        run: |
+          node --input-type=module -e "import {readFileSync} from 'node:fs'; const version = JSON.parse(readFileSync('packages/proof/package.json','utf8')).version; if (process.env.GITHUB_REF !== 'refs/tags/v' + version) { console.error('tag is not v' + version); process.exit(1) }"
+      - run: npm test
+      - run: npm publish -w @signet/proof --access public

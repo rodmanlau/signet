@@ -1,9 +1,25 @@
 {
   "name": "@signet/proof",
+  "version": "0.1.0",
   "type": "module",
   "sideEffects": false,
+  "files": ["dist"],
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rodamn/signet.git",
+    "directory": "packages/proof"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@noble/ed25519": "^3.2.0",
