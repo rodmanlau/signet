@@ -1,5 +1,5 @@
 import { createServer } from 'node:net'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { keygenAsync as generateKeyPair } from '@noble/ed25519'
@@ -151,6 +151,56 @@ it('stops when the agent key is the wrong length', async () => {
     ])
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+it('resolves file arguments from the directory where npm was started', async () => {
+  const { secretKey, publicKey } = await generateKeyPair()
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const invoked = await mkdtemp(join(tmpdir(), 'signet-client-invoked-'))
+  const elsewhere = await mkdtemp(join(tmpdir(), 'signet-client-cwd-'))
+  const keysDir = join(invoked, '.signet')
+  await mkdir(keysDir)
+  await writeFile(
+    join(keysDir, 'keys.json'),
+    JSON.stringify([{ id: 'k1', publicKey: Buffer.from(publicKey).toString('base64') }]),
+  )
+  const server = await startLogin({
+    port,
+    host: '127.0.0.1',
+    issuer: origin,
+    keyId: 'k1',
+    privateKey: secretKey,
+    publicKey,
+    derivationKey: new TextEncoder().encode('signet-client-test'),
+    now: () => Math.floor(Date.now() / 1000),
+    testLogin: false,
+    sessionsFile: join(invoked, 'sessions.json'),
+  })
+  const previousCwd = process.cwd()
+  const previousInit = process.env.INIT_CWD
+  process.chdir(elsewhere)
+  process.env.INIT_CWD = invoked
+  try {
+    const lines: string[] = []
+    const code = await runSignetClient(
+      ['--agent', origin, 'http://127.0.0.1:8080', join('.signet', 'agent.key'), join('.signet', 'keys.json')],
+      (line) => lines.push(line),
+    )
+    expect(code).toBe(0)
+    expect(lines[2]?.startsWith('3. Agent key: created. Public key: ')).toBe(true)
+    expect(lines[8]?.startsWith('9. Identity: ')).toBe(true)
+    const secret = await readFile(join(keysDir, 'agent.key'))
+    expect(secret).toHaveLength(32)
+    await expect(readFile(join(elsewhere, '.signet', 'agent.key'))).rejects.toThrow()
+  } finally {
+    process.chdir(previousCwd)
+    if (previousInit === undefined) delete process.env.INIT_CWD
+    else process.env.INIT_CWD = previousInit
+    await server.close()
+    await rm(invoked, { recursive: true, force: true })
+    await rm(elsewhere, { recursive: true, force: true })
   }
 })
 

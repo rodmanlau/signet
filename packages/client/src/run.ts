@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
+import { isAbsolute, resolve } from 'node:path'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } from '@agenticage/proof'
 
@@ -255,7 +256,7 @@ async function finishProof(
   const idStep = step + 2
   let text: string
   try {
-    text = await readFile(keyFile, 'utf8')
+    text = await readFile(invocationPath(keyFile), 'utf8')
   } catch (error) {
     write(`${idStep}. Identity: ${errorMessage(error)}`)
     return 1
@@ -306,16 +307,24 @@ function loopbackAudience(value: string): URL | null {
 }
 
 async function loadAgentKey(path: string): Promise<{ secret: Uint8Array; created: boolean }> {
+  const file = invocationPath(path)
   try {
-    const bytes = new Uint8Array(await readFile(path))
+    const bytes = new Uint8Array(await readFile(file))
     if (bytes.length !== 32) throw new Error('bad length.')
     return { secret: bytes, created: false }
   } catch (error) {
     if (!isMissing(error)) throw error
   }
   const created = new Uint8Array(randomBytes(32))
-  await writeFile(path, created, { mode: 0o600, flag: 'wx' })
+  await writeFile(file, created, { mode: 0o600, flag: 'wx' })
   return { secret: created, created: true }
+}
+
+function invocationPath(file: string): string {
+  if (isAbsolute(file)) return file
+  const base = process.env.INIT_CWD
+  if (base !== undefined && base.length > 0) return resolve(base, file)
+  return resolve(file)
 }
 
 function decodeProofBody(body: string): Uint8Array | null {
