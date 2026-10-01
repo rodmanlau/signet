@@ -6,7 +6,7 @@ The signing key and the derivation key stay on this machine. Changing the addres
 
 ## Setup
 
-The default directory is `.valar/login`. Setup creates it and writes:
+The default directory is `.signet`. Setup creates it and writes:
 
 | File | Contents |
 | --- | --- |
@@ -19,7 +19,7 @@ The default directory is `.valar/login`. Setup creates it and writes:
 node scripts/setup-login.mjs
 ```
 
-`.valar/` is gitignored. A second run keeps both keys and keeps `login.env`, and rewrites `identity-keys.json` from the signing key. Setup does not rewrite an existing `login.env`. An existing file still has the old names until you edit it.
+`.signet/` is gitignored. A second run keeps both keys and keeps `login.env`, and rewrites `identity-keys.json` from the signing key. Setup does not rewrite an existing `login.env`. An existing file still has the old names until you edit it.
 
 Pass a directory when the keys should live somewhere else. A relative path is resolved from the repository root:
 
@@ -27,7 +27,7 @@ Pass a directory when the keys should live somewhere else. A relative path is re
 node scripts/setup-login.mjs keys
 ```
 
-If the keys already exist, pass that directory. Do not copy it into this repository. Do not run setup with no arguments when you mean to keep an existing directory: that mints a new key in `.valar/login`. A directory that already has one of the two key files and not the other is refused with `refusing to mint one key beside an existing key`.
+If the keys already exist, pass that directory. Do not copy it into this repository. Do not run setup with no arguments when you mean to keep an existing directory: that mints a new key in `.signet`. A directory that already has one of the two key files and not the other is refused with `refusing to mint one key beside an existing key`.
 
 Give checkers `identity-keys.json` and the issuer origin. They do not get `private-key`, `derivation-key`, or `login.env`.
 

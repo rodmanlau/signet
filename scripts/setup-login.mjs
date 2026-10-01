@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { getPublicKeyAsync } from '@noble/ed25519'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dir = resolve(process.argv[2] ?? join(repoRoot, '.valar', 'login'))
+const dir = resolve(process.argv[2] ?? join(repoRoot, '.signet'))
 const privatePath = join(dir, 'private-key')
 const derivationPath = join(dir, 'derivation-key')
 const publicPath = join(dir, 'identity-keys.json')

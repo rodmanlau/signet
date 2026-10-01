@@ -1,4 +1,4 @@
-.valar/
+.signet/
 node_modules/
 dist/
 *.tsbuildinfo

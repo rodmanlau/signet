@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { applyLoginEnv } from './login-env.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dir = resolve(process.argv[2] ?? join(repoRoot, '.valar', 'login'))
+const dir = resolve(process.argv[2] ?? join(repoRoot, '.signet'))
 const envPath = join(dir, 'login.env')
 
 let text
