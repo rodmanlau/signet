@@ -852,6 +852,163 @@ describe('login origin', () => {
       await sessions.remove()
     }
   })
+
+  it('offers the configured accounts on the switch page', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const exchange = async () => ({ subject: 'ada', label: 'Ada' })
+    const sessionsOn = await tempSessions()
+    const on = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+      now: () => 1_700_000_000,
+      testLogin: true,
+      sessionsFile: sessionsOn.file,
+      providers: {
+        google: { clientId: 'google-client', authorizeUrl: 'https://provider.test/auth', exchange },
+        apple: { clientId: 'apple-client', authorizeUrl: 'https://apple.test/auth', exchange },
+        facebook: { clientId: 'facebook-client', authorizeUrl: 'https://facebook.test/auth', exchange },
+      },
+    })
+    try {
+      const minted = await fetch(new URL('/test-login', on.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'google', subject: 'ada', label: 'A&B <ada>' }),
+      })
+      const session = cookieValue(setCookie(minted, 'valar_session'))
+      const cookie = { cookie: `valar_session=${session}` }
+      const switchUrl = new URL('/switch', on.url)
+      switchUrl.searchParams.set('audience', 'https://friends.example')
+      switchUrl.searchParams.set('return', 'https://friends.example/room')
+      const page = await fetch(switchUrl, { headers: cookie })
+      expect(page.status).toBe(200)
+      expect(page.headers.getSetCookie().some((line) => line.startsWith('valar_session='))).toBe(false)
+      const html = await page.text()
+      expect(html).toContain('<title>Switch account</title>')
+      expect(html).toContain('<h1>Switch account</h1>')
+      expect(html).toContain('You are signed in as A&amp;B &lt;ada&gt;.')
+      expect(html).toContain('Continue with Google')
+      expect(html).toContain('Continue with Apple')
+      expect(html).toContain('Continue with Facebook')
+      expect(html).not.toContain('>Sign out<')
+      expect(html).not.toContain('no-provider')
+      // href text escapes & as &amp;. Decode before reading the query.
+      const googleHref = html.match(/href="([^"]*\/auth\/google[^"]*)"/)?.[1]?.replaceAll('&amp;', '&') ?? ''
+      const appleHref = html.match(/href="([^"]*\/auth\/apple[^"]*)"/)?.[1]?.replaceAll('&amp;', '&') ?? ''
+      const facebookHref = html.match(/href="([^"]*\/auth\/facebook[^"]*)"/)?.[1]?.replaceAll('&amp;', '&') ?? ''
+      expect(new URL(googleHref, on.url).searchParams.get('prompt')).toBe('select_account')
+      expect(new URL(appleHref, on.url).searchParams.get('prompt')).toBeNull()
+      expect(new URL(facebookHref, on.url).searchParams.get('prompt')).toBeNull()
+      expect(html.indexOf('Continue with Google')).toBeLessThan(html.indexOf('Continue with Apple'))
+      expect(html.indexOf('Continue with Apple')).toBeLessThan(html.indexOf('Continue with Facebook'))
+
+      const bare = await fetch(switchUrl)
+      const bareHtml = await bare.text()
+      expect(bareHtml).toContain('<title>Sign in</title>')
+      expect(bareHtml).toContain('choose an account')
+      expect(bareHtml).not.toContain('You are signed in as')
+      expect(bareHtml).not.toContain('prompt=select_account')
+
+      const posted = await fetch(switchUrl, { method: 'POST' })
+      expect(posted.status).toBe(405)
+      expect(posted.headers.get('allow')).toBe('GET')
+
+      const google = new URL('/auth/google', on.url)
+      google.searchParams.set('audience', 'https://friends.example')
+      google.searchParams.set('return', 'https://friends.example/room')
+      google.searchParams.set('prompt', 'select_account')
+      const began = await fetch(google, { redirect: 'manual' })
+      expect(new URL(began.headers.get('location') ?? '').searchParams.get('prompt')).toBe('select_account')
+
+      const plain = new URL('/auth/google', on.url)
+      plain.searchParams.set('audience', 'https://friends.example')
+      plain.searchParams.set('return', 'https://friends.example/room')
+      const plainBegan = await fetch(plain, { redirect: 'manual' })
+      expect(new URL(plainBegan.headers.get('location') ?? '').searchParams.get('prompt')).toBeNull()
+
+      const loginPrompt = new URL(google)
+      loginPrompt.searchParams.set('prompt', 'login')
+      const ignored = await fetch(loginPrompt, { redirect: 'manual' })
+      expect(new URL(ignored.headers.get('location') ?? '').searchParams.get('prompt')).toBeNull()
+
+      const apple = new URL('/auth/apple', on.url)
+      apple.searchParams.set('audience', 'https://friends.example')
+      apple.searchParams.set('return', 'https://friends.example/room')
+      apple.searchParams.set('prompt', 'select_account')
+      const appleBegan = await fetch(apple, { redirect: 'manual' })
+      expect(new URL(appleBegan.headers.get('location') ?? '').searchParams.get('prompt')).toBeNull()
+    } finally {
+      await on.close()
+      await sessionsOn.remove()
+    }
+
+    const quietSessions = await tempSessions()
+    const quietId = 'quiet-session-id1'
+    await writeFile(
+      quietSessions.file,
+      JSON.stringify({ [quietId]: { provider: 'google', subject: 'ada', label: 'Ada' } }),
+    )
+    const quiet = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+      now: () => 1_700_000_000,
+      testLogin: false,
+      providers: {},
+      sessionsFile: quietSessions.file,
+    })
+    const formSessions = await tempSessions()
+    const form = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+      now: () => 1_700_000_000,
+      testLogin: true,
+      providers: {},
+      sessionsFile: formSessions.file,
+    })
+    try {
+      const quietPage = new URL('/switch', quiet.url)
+      quietPage.searchParams.set('audience', 'https://friends.example')
+      quietPage.searchParams.set('return', 'https://friends.example/room')
+      const warned = await fetch(quietPage, { headers: { cookie: `valar_session=${quietId}` } })
+      const warnedHtml = await warned.text()
+      expect(warnedHtml).toContain('You are signed in as Ada.')
+      expect(warnedHtml).toContain('Sign-in is not set up.')
+      expect(warnedHtml).toContain('no-provider')
+      expect(warnedHtml).not.toContain('/auth/google')
+
+      const minted = await fetch(new URL('/test-login', form.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'google', subject: 'ada', label: 'Ada' }),
+      })
+      const formCookie = cookieValue(setCookie(minted, 'valar_session'))
+      const formPage = new URL('/switch', form.url)
+      formPage.searchParams.set('audience', 'https://friends.example')
+      formPage.searchParams.set('return', 'https://friends.example/room')
+      const formed = await fetch(formPage, { headers: { cookie: `valar_session=${formCookie}` } })
+      const formedHtml = await formed.text()
+      expect(formedHtml).toContain('You are signed in as Ada.')
+      expect(formedHtml).toContain('<button type="submit">Sign in</button>')
+      expect(formedHtml).not.toContain('no-provider')
+    } finally {
+      await quiet.close()
+      await form.close()
+      await quietSessions.remove()
+      await formSessions.remove()
+    }
+  })
 })
 
 describe('decideAgentProof', () => {

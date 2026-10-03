@@ -153,6 +153,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (path === '/connect') return await handleConnect(req, res, ctx, url)
     if (path === '/.well-known/signet-keys') return handleKeys(req, res, ctx)
     if (path === '/sign-out') return await handleSignOut(req, res, ctx, url)
+    if (path === '/switch') return await handleSwitch(req, res, ctx, url)
     if (path === '/logout') return await handleLogout(req, res, ctx)
     if (path === '/test-login') return await handleTestLogin(req, res, ctx, url)
     if (path === '/agent-proof') return await handleAgentProof(req, res, ctx)
@@ -418,7 +419,14 @@ function handleAuth(req: IncomingMessage, res: ServerResponse, ctx: Ctx, url: UR
   }
   if (query.site !== undefined) pending.site = query.site
   const state = seal(ctx.derivationKey, OAUTH_DOMAIN, JSON.stringify(pending))
-  const location = authorizeLocation(provider, config, `${ctx.issuer}/auth/${provider}/callback`, state)
+  const prompt = url.searchParams.get('prompt') === 'select_account' ? 'select_account' : undefined
+  const location = authorizeLocation(
+    provider,
+    config,
+    `${ctx.issuer}/auth/${provider}/callback`,
+    state,
+    provider === 'google' ? prompt : undefined,
+  )
   sendRedirect(res, 302, location, '', [`${OAUTH_COOKIE}=${encodeURIComponent(nonce)}; ${OAUTH_FLAGS}; Max-Age=600`])
 }
 
@@ -548,13 +556,57 @@ function providersPage(ctx: Ctx, query: ConnectQuery): string {
   return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Sign in</title><style>${ACCOUNT_STYLE}</style>${body}</html>`
 }
 
+function switchPage(ctx: Ctx, query: ConnectQuery, label: string): string {
+  const links = PROVIDERS.flatMap((provider) => {
+    if (!configured(ctx, provider)) return []
+    return [{
+      href: authPath(provider, query, provider === 'google' ? 'select_account' : undefined),
+      provider,
+      label: `Continue with ${NAMES[provider]}`,
+    }]
+  })
+  const buttons = links
+    .map((link) => {
+      const href = escapeHtml(link.href)
+      const text = escapeHtml(link.label)
+      const mark = link.provider === 'apple' ? '40' : '20'
+      return `<a class="account" href="${href}"><img class="${link.provider}" src="/marks/${link.provider}.svg" alt="" width="${mark}" height="${mark}">${text}</a>`
+    })
+    .join('')
+  const test = ctx.testLogin ? testLoginForm(query) : ''
+  const sentence = `<p>You are signed in as ${escapeHtml(label)}.</p>`
+  const body =
+    links.length === 0 && !ctx.testLogin
+      ? `<h1>Switch account</h1>${sentence}<p>Sign-in is not set up.</p><p>no-provider</p>`
+      : links.length === 0
+        ? `<h1>Switch account</h1>${sentence}${test}`
+        : `<h1>Switch account</h1>${sentence}<div class="accounts">${buttons}</div>${test}`
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Switch account</title><style>${ACCOUNT_STYLE}</style>${body}</html>`
+}
+
+async function handleSwitch(req: IncomingMessage, res: ServerResponse, ctx: Ctx, url: URL): Promise<void> {
+  if (req.method !== 'GET') return sendText(res, 405, 'method not allowed', { allow: 'GET' })
+  const query = acceptedQuery(ctx, url)
+  if (!query) return sendText(res, 400, 'rejected')
+  const stored = readSession(ctx, req.headers.cookie)
+  if (!stored) {
+    sendHtml(res, 200, providersPage(ctx, query))
+    return
+  }
+  sendHtml(res, 200, switchPage(ctx, query, stored.label))
+}
+
 function testLoginForm(query: ConnectQuery): string {
   const action = escapeHtml(queryPath('/test-login', query))
   return `<form method="post" action="${action}"><button type="submit">Sign in</button></form>`
 }
 
-function authPath(provider: ProviderName, query: ConnectQuery): string {
-  return queryPath(`/auth/${provider}`, query)
+function authPath(provider: ProviderName, query: ConnectQuery, prompt?: 'select_account'): string {
+  const path = queryPath(`/auth/${provider}`, query)
+  if (prompt === undefined) return path
+  const params = new URLSearchParams(path.slice(path.indexOf('?') + 1))
+  params.set('prompt', prompt)
+  return `${path.slice(0, path.indexOf('?'))}?${params.toString()}`
 }
 
 function connectingPage(text: string, location: string): string {
@@ -576,7 +628,13 @@ function configured(ctx: Ctx, provider: ProviderName): LoginProvider | undefined
   return { ...found, clientId: found.clientId.trim() }
 }
 
-function authorizeLocation(provider: ProviderName, config: LoginProvider, redirectUri: string, state: string): string {
+function authorizeLocation(
+  provider: ProviderName,
+  config: LoginProvider,
+  redirectUri: string,
+  state: string,
+  prompt?: 'select_account',
+): string {
   const url = new URL(config.authorizeUrl ?? AUTHORIZE[provider])
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new HttpError(500, 'error')
   url.searchParams.set('client_id', config.clientId)
@@ -584,6 +642,7 @@ function authorizeLocation(provider: ProviderName, config: LoginProvider, redire
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('state', state)
   if (provider === 'google') url.searchParams.set('scope', 'openid email profile')
+  if (provider === 'google' && prompt === 'select_account') url.searchParams.set('prompt', 'select_account')
   if (provider === 'apple') {
     url.searchParams.set('scope', 'name email')
     url.searchParams.set('response_mode', 'form_post')
