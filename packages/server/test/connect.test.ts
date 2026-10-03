@@ -1009,6 +1009,90 @@ describe('login origin', () => {
       await formSessions.remove()
     }
   })
+
+  it('replaces the browser account when a new sign-in finishes', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const derivationKey = new TextEncoder().encode('0123456789abcdef0123456789abcdef')
+    let subject = 'ada'
+    let label = 'Ada'
+    const sessions = await tempSessions()
+    const server = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey,
+      now: () => 1_700_000_000,
+      testLogin: true,
+      sessionsFile: sessions.file,
+      providers: {
+        google: {
+          clientId: 'google-client',
+          authorizeUrl: 'https://provider.test/auth',
+          exchange: async (code) => {
+            if (code === 'bad') throw new Error('provider down')
+            return { subject, label }
+          },
+        },
+      },
+    })
+    const connect = new URL('/connect', server.url)
+    connect.searchParams.set('audience', 'https://friends.example')
+    connect.searchParams.set('return', 'https://friends.example/room')
+    const finish = async (code: string, session?: string) => {
+      const start = new URL('/auth/google', server.url)
+      start.searchParams.set('audience', 'https://friends.example')
+      start.searchParams.set('return', 'https://friends.example/room')
+      const began = await fetch(start, { redirect: 'manual' })
+      const state = new URL(began.headers.get('location') ?? '').searchParams.get('state') ?? ''
+      const nonce = cookieValue(setCookie(began, 'valar_oauth'))
+      const callback = new URL('/auth/google/callback', server.url)
+      callback.searchParams.set('code', code)
+      callback.searchParams.set('state', state)
+      const headers: Record<string, string> = { cookie: `valar_oauth=${nonce}` }
+      if (session !== undefined) headers.cookie = `valar_oauth=${nonce}; valar_session=${session}`
+      return fetch(callback, { redirect: 'manual', headers })
+    }
+    try {
+      const first = await finish('ok')
+      expect(first.status).toBe(200)
+      const firstId = cookieValue(setCookie(first, 'valar_session'))
+
+      subject = 'bea'
+      label = 'Bea'
+      const failed = await finish('bad', firstId)
+      expect(failed.status).toBe(303)
+      expect(new URL(failed.headers.get('location') ?? '').hash).toBe('#signet-identity=failed')
+      const still = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${firstId}` } })
+      expect(await still.text()).toContain('Signed in as Ada.')
+
+      const second = await finish('ok', firstId)
+      expect(second.status).toBe(200)
+      expect(await second.text()).toContain('Signed in as Bea. Taking you back to friends.example.')
+      const secondId = cookieValue(setCookie(second, 'valar_session'))
+      expect(secondId).not.toBe(firstId)
+      const stored = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, { label: string }>
+      expect(Object.keys(stored)).toEqual([secondId])
+      expect(stored[secondId]?.label).toBe('Bea')
+      const old = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${firstId}` } })
+      expect(await old.text()).toContain('<h1>Sign in</h1>')
+      const newer = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${secondId}` } })
+      expect(await newer.text()).toContain('Signed in as Bea.')
+
+      subject = 'bea'
+      label = 'Bea'
+      const same = await finish('ok', secondId)
+      const sameId = cookieValue(setCookie(same, 'valar_session'))
+      expect(sameId).not.toBe(secondId)
+      const afterSame = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, { subject: string }>
+      expect(Object.keys(afterSame)).toEqual([sameId])
+      expect(afterSame[sameId]?.subject).toBe('bea')
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
 })
 
 describe('decideAgentProof', () => {

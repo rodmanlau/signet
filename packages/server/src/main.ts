@@ -302,11 +302,13 @@ async function handleTestLogin(req: IncomingMessage, res: ServerResponse, ctx: C
       derivationKey: ctx.derivationKey,
     })
     if (decision.type !== 'redirect') return sendText(res, 400, 'rejected')
+    const previous = readSession(ctx, req.headers.cookie)
     const text = connectingText(query.audience, session.label, query.site)
-    sendHtml(res, 200, connectingPage(text, decision.location), [await issueSession(ctx, session)])
+    sendHtml(res, 200, connectingPage(text, decision.location), [await issueSession(ctx, session, previous?.id)])
     return
   }
-  sendEmpty(res, 204, [await issueSession(ctx, session)])
+  const previous = readSession(ctx, req.headers.cookie)
+  sendEmpty(res, 204, [await issueSession(ctx, session, previous?.id)])
 }
 
 const LOCAL_TEST_SESSION: LoginSession = { provider: 'google', subject: 'local', label: 'Local' }
@@ -474,9 +476,10 @@ async function handleCallback(
     derivationKey: ctx.derivationKey,
   })
   if (decision.type !== 'redirect') return failLogin(res, pending)
+  const previous = readSession(ctx, req.headers.cookie)
   const text = connectingText(pending.audience, session.label, pending.site)
   sendHtml(res, 200, connectingPage(text, decision.location), [
-    await issueSession(ctx, session),
+    await issueSession(ctx, session, previous?.id),
     clearCookie(OAUTH_COOKIE, OAUTH_FLAGS),
   ])
 }
@@ -652,13 +655,16 @@ function authorizeLocation(
   return url.href
 }
 
-async function issueSession(ctx: Ctx, session: LoginSession): Promise<string> {
+async function issueSession(ctx: Ctx, session: LoginSession, previousId?: string): Promise<string> {
   const id = randomBytes(16).toString('base64url')
+  const previous = previousId === undefined ? undefined : ctx.sessions.get(previousId)
+  if (previousId !== undefined) ctx.sessions.delete(previousId)
   ctx.sessions.set(id, session)
   try {
     await persist(ctx)
   } catch (error) {
     ctx.sessions.delete(id)
+    if (previous !== undefined && previousId !== undefined) ctx.sessions.set(previousId, previous)
     throw error
   }
   return sessionCookie(id, ctx.issuer)
