@@ -1,4 +1,5 @@
 .signet/
+.worktrees/
 node_modules/
 dist/
 *.tsbuildinfo
