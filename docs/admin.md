@@ -47,6 +47,14 @@ The process listens on `127.0.0.1:8787` and prints that URL. Set `SIGNET_HOST` i
 
 `SIGNET_TEST=1` in the generated env turns on `POST /test-login` and shows a Sign in button on the connect page. That mints a session without Google, Apple, or Facebook. Turn that off for a public host: remove the line from `login.env`, restart, and set the provider variables below. A provider with no client id has no button.
 
+## Public host
+
+Fly.io runs one machine from `Dockerfile` and `fly.toml`. The app name is `agenticage-signet`, the region is `iad`, and the issuer is `https://agenticage-signet.fly.dev`. The process listens on `0.0.0.0:8787`. Sessions are `/data/sessions.json` on that machine's volume. The machine stays up when idle. A deploy replaces that one machine. It does not add a second.
+
+The image starts `@agenticage/server` directly. It does not read `login.env`. `SIGNET_PRIVATE_KEY` and `SIGNET_DERIVATION_KEY` are Fly secrets, the same two values already in `.signet/login.env`. Leave `SIGNET_HOST`, `SIGNET_PORT`, `SIGNET_SESSIONS`, `SIGNET_ISSUER`, and `SIGNET_TEST` out of those secrets. `SIGNET_TEST` stays unset. A provider's client id and secret are Fly secrets when that provider is used.
+
+A push to `master` deploys after the test workflow passes. The GitHub secret `FLY_API_TOKEN` is a Fly deploy token. Pull requests run tests and do not deploy.
+
 ## Variables
 
 `login.env` is `NAME=VALUE` lines. Blank lines and lines starting with `#` are ignored. The start script loads a name from it only when the environment has not already set that name. These are the names this process reads. A checker does not read them.

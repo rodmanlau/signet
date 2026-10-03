@@ -1,0 +1,6 @@
+.git
+.github
+.signet
+node_modules
+dist
+*.tsbuildinfo

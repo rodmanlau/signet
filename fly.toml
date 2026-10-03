@@ -1,0 +1,34 @@
+app = "agenticage-signet"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SIGNET_HOST = "0.0.0.0"
+  SIGNET_PORT = "8787"
+  SIGNET_SESSIONS = "/data/sessions.json"
+  SIGNET_KEY_ID = "k1"
+  SIGNET_ISSUER = "https://agenticage-signet.fly.dev"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[mounts]
+  source = "signet_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[deploy]
+  strategy = "rolling"
+
+[[restart]]
+  policy = "always"
