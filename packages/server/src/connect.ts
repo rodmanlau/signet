@@ -11,9 +11,13 @@ export type ConnectDecision =
 
 const PROOF_SECONDS = 15 * 60
 
+export function destinationName(audience: string, site?: string): string {
+  if (site !== undefined && site.length > 0) return site
+  return new URL(audience).hostname
+}
+
 export function connectingText(audience: string, label: string, site?: string): string {
-  if (site === undefined) return `Connecting to ${audience} as ${label}`
-  return `Connecting to ${audience} (${site}) as ${label}`
+  return `Signed in as ${label}. Taking you back to ${destinationName(audience, site)}.`
 }
 
 export function decideConnect(input: {

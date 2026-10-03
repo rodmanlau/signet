@@ -6,7 +6,7 @@ import { keygenAsync as generateKeyPair } from '@noble/ed25519'
 import { describe, expect, it } from 'vitest'
 import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } from '@agenticage/proof'
 import { agentSubject, deriveIdentity } from '../src/identity.js'
-import { connectingText, decideAgentProof, decideConnect } from '../src/connect.js'
+import { connectingText, decideAgentProof, decideConnect, destinationName } from '../src/connect.js'
 import { startLogin } from '../src/main.js'
 
 function acceptedIdentity(
@@ -128,11 +128,21 @@ describe('decideConnect', () => {
         returnUrl: 'http://127.0.0.1:3000/room',
       }).type,
     ).toBe('reject')
+    expect(destinationName('https://friends.example')).toBe('friends.example')
+    expect(destinationName('https://friends.example', '')).toBe('friends.example')
+    expect(destinationName('https://friends.example', 'Friends')).toBe('Friends')
+    expect(destinationName('http://192.0.2.10:8080')).toBe('192.0.2.10')
     expect(connectingText('https://friends.example', 'ada@gmail.com')).toBe(
-      'Connecting to https://friends.example as ada@gmail.com',
+      'Signed in as ada@gmail.com. Taking you back to friends.example.',
     )
     expect(connectingText('https://friends.example', 'ada@gmail.com', 'Friends')).toBe(
-      'Connecting to https://friends.example (Friends) as ada@gmail.com',
+      'Signed in as ada@gmail.com. Taking you back to Friends.',
+    )
+    expect(connectingText('https://friends.example', 'ada@gmail.com', '')).toBe(
+      'Signed in as ada@gmail.com. Taking you back to friends.example.',
+    )
+    expect(connectingText('http://192.0.2.10:8080', 'Ada')).toBe(
+      'Signed in as Ada. Taking you back to 192.0.2.10.',
     )
     expect(
       decideConnect({ ...keys, session: null, audience: 'https://friends.example', returnUrl: 'https://friends.example/room' })
@@ -142,6 +152,170 @@ describe('decideConnect', () => {
 })
 
 describe('login origin', () => {
+  it('serves only the three official marks', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const sessions = await tempSessions()
+    const server = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+      now: () => 1_700_000_000,
+      testLogin: false,
+      providers: {},
+      sessionsFile: sessions.file,
+    })
+    try {
+      for (const name of ['google', 'apple', 'facebook']) {
+        const mark = await fetch(new URL(`/marks/${name}.svg`, server.url))
+        expect(mark.status).toBe(200)
+        expect(mark.headers.get('content-type')).toContain('image/svg+xml')
+        expect(await mark.text()).toContain('<svg')
+      }
+      const missing = await fetch(new URL('/marks/other.svg', server.url))
+      expect(missing.status).toBe(404)
+      expect(await missing.text()).toBe('not found')
+      const escaped = await fetch(new URL('/marks/../package.json', server.url))
+      expect(escaped.status).toBe(404)
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
+
+  it('tells the person how to sign in', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const derivationKey = new TextEncoder().encode('0123456789abcdef0123456789abcdef')
+    const sessions = await tempSessions()
+    const server = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey,
+      now: () => 1_700_000_000,
+      testLogin: false,
+      sessionsFile: sessions.file,
+      providers: {
+        google: { clientId: 'google-client', exchange: async () => ({ subject: 's', label: 'Ada' }) },
+        apple: { clientId: 'apple-client', exchange: async () => ({ subject: 's', label: 'Ada' }) },
+        facebook: { clientId: 'facebook-client', exchange: async () => ({ subject: 's', label: 'Ada' }) },
+      },
+    })
+    try {
+      const connect = new URL('/connect', server.url)
+      connect.searchParams.set('audience', 'https://friends.example')
+      connect.searchParams.set('return', 'https://friends.example/room')
+      const page = await fetch(connect)
+      expect(page.status).toBe(200)
+      const html = await page.text()
+      expect(html).toContain('<title>Sign in</title>')
+      expect(html).toContain('<h1>Sign in</h1>')
+      expect(html).toContain(
+        'To continue to friends.example, choose an account. You sign in on that site, then come back here.',
+      )
+      expect(html).not.toContain('no-provider')
+      const google = html.indexOf('Continue with Google')
+      const apple = html.indexOf('Continue with Apple')
+      const facebook = html.indexOf('Continue with Facebook')
+      expect(google).toBeGreaterThan(-1)
+      expect(apple).toBeGreaterThan(google)
+      expect(facebook).toBeGreaterThan(apple)
+      expect(html).toContain('src="/marks/google.svg"')
+      expect(html).toContain('src="/marks/apple.svg"')
+      expect(html).toContain('src="/marks/facebook.svg"')
+      expect(html).not.toContain('https://developers.google.com')
+      expect(html).not.toContain('https://appleid.apple.com')
+      expect(html).not.toContain('https://www.facebook.com')
+      expect(html).toContain('/auth/google?')
+      expect(html).toContain('audience=https%3A%2F%2Ffriends.example')
+      expect(html).toContain('return=https%3A%2F%2Ffriends.example%2Froom')
+      expect(html).toContain('width="20" height="20"')
+      expect(html).toContain('alt=""')
+      expect(html).toContain('width:320px')
+      expect(html).toContain('height:40px')
+
+      const named = new URL('/connect', server.url)
+      named.searchParams.set('audience', 'https://friends.example')
+      named.searchParams.set('return', 'https://friends.example/room')
+      named.searchParams.set('site', '<Friends & co>')
+      const namedHtml = await (await fetch(named)).text()
+      expect(namedHtml).toContain('To continue to &lt;Friends &amp; co&gt;, choose an account.')
+      expect(namedHtml).not.toContain('To continue to <Friends')
+      expect(namedHtml).not.toContain('friends.example, choose an account')
+
+      const blankSite = new URL('/connect', server.url)
+      blankSite.searchParams.set('audience', 'http://192.0.2.10:8080')
+      blankSite.searchParams.set('return', 'http://192.0.2.10:8080/')
+      blankSite.searchParams.set('site', '')
+      const blankHtml = await (await fetch(blankSite)).text()
+      expect(blankHtml).toContain('To continue to 192.0.2.10, choose an account.')
+      expect(blankHtml).not.toContain('192.0.2.10:8080, choose an account')
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
+
+  it('warns no-provider when no account button can be shown', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const derivationKey = new TextEncoder().encode('0123456789abcdef0123456789abcdef')
+    const sessions = await tempSessions()
+    const open = async (
+      providers: Record<string, { clientId: string; exchange: () => Promise<{ subject: string; label: string }> }>,
+      testLogin: boolean,
+    ) => {
+      const server = await startLogin({
+        port: 0,
+        issuer: 'https://login.example',
+        keyId: 'k1',
+        privateKey: secretKey,
+        publicKey,
+        derivationKey,
+        now: () => 1_700_000_000,
+        testLogin,
+        providers,
+        sessionsFile: sessions.file,
+      })
+      const connect = new URL('/connect', server.url)
+      connect.searchParams.set('audience', 'https://friends.example')
+      connect.searchParams.set('return', 'https://friends.example/room')
+      const html = await (await fetch(connect)).text()
+      await server.close()
+      return html
+    }
+    try {
+      const exchange = async () => ({ subject: 's', label: 'Ada' })
+      const empty = await open({}, false)
+      expect(empty).toContain('<h1>Sign in</h1>')
+      expect(empty).toContain('Sign-in is not set up.')
+      expect(empty).toContain('no-provider')
+      expect(empty).not.toContain('/auth/google')
+      expect(empty).not.toContain('/auth/apple')
+      expect(empty).not.toContain('/auth/facebook')
+
+      const spaces = await open({ google: { clientId: '   ', exchange } }, false)
+      expect(spaces).toContain('no-provider')
+      expect(spaces).not.toContain('Continue with Google')
+
+      const googleOnly = await open({ google: { clientId: 'google-client', exchange } }, false)
+      expect(googleOnly).toContain('Continue with Google')
+      expect(googleOnly).not.toContain('Continue with Apple')
+      expect(googleOnly).not.toContain('Continue with Facebook')
+      expect(googleOnly).not.toContain('no-provider')
+
+      const testOnly = await open({}, true)
+      expect(testOnly).toContain('<button type="submit">Sign in</button>')
+      expect(testOnly).toContain('/test-login?')
+      expect(testOnly).not.toContain('no-provider')
+    } finally {
+      await sessions.remove()
+    }
+  })
+
   it('shows configured providers and signs only the stub subject', async () => {
     const { secretKey, publicKey } = await generateKeyPair()
     const derivationKey = new TextEncoder().encode('0123456789abcdef0123456789abcdef')
@@ -239,7 +413,7 @@ describe('login origin', () => {
       expect(back.status).toBe(200)
       expect(back.headers.get('location')).toBeNull()
       const backBody = await back.text()
-      expect(backBody).toContain('Connecting to https://friends.example (Friends) as ada@gmail.com')
+      expect(backBody).toContain('Signed in as ada@gmail.com. Taking you back to Friends.')
       const sessionLine = setCookie(back, 'valar_session')
       expect(sessionLine).toContain('HttpOnly')
       expect(sessionLine).toContain('Secure')
@@ -257,7 +431,7 @@ describe('login origin', () => {
       const done = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${session}` } })
       expect(done.status).toBe(200)
       const doneBody = await done.text()
-      expect(doneBody).toContain('Connecting to https://friends.example (Friends) as ada@gmail.com')
+      expect(doneBody).toContain('Signed in as ada@gmail.com. Taking you back to Friends.')
       expect(proofFromPage(doneBody).length).toBeGreaterThan(0)
       const kept = setCookie(done, 'valar_session')
       expect(kept).toContain('Max-Age=34560000')
@@ -336,7 +510,7 @@ describe('login origin', () => {
       const done = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${cookieValue(line)}` } })
       expect(done.status).toBe(200)
       const body = await done.text()
-      expect(body).toContain('Connecting to https://friends.example as Ada')
+      expect(body).toContain('Signed in as Ada. Taking you back to friends.example.')
       const proof = proofFromPage(body)
       expect(acceptedIdentity(proof, publicKey, 1_700_000_000, 'https://login.example', 'https://friends.example')).toBe(
         deriveIdentity('apple', 'sub-9', 'friends.example', derivationKey),
@@ -384,7 +558,7 @@ describe('login origin', () => {
       const done = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${cookie}` } })
       expect(done.status).toBe(200)
       const body = await done.text()
-      expect(body).toContain('Connecting to https://friends.example as Ada')
+      expect(body).toContain('Signed in as Ada. Taking you back to friends.example.')
       const refreshed = setCookie(done, 'valar_session')
       expect(refreshed).toContain('HttpOnly')
       expect(refreshed).toContain('Secure')
@@ -478,7 +652,7 @@ describe('login origin', () => {
       })
       expect(posted.status).toBe(200)
       const body = await posted.text()
-      expect(body).toContain('Connecting to http://192.0.2.10:8080 as Local')
+      expect(body).toContain('Signed in as Local. Taking you back to 192.0.2.10.')
       const line = setCookie(posted, 'valar_session')
       expect(line).toContain('HttpOnly')
       expect(line).toContain('SameSite=Lax')

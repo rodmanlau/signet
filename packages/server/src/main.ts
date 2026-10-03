@@ -2,11 +2,11 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { basename, dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { getPublicKey } from '@noble/ed25519'
 import '@agenticage/proof'
 import type { ProviderName } from './identity.js'
-import { connectingText, decideAgentProof, decideConnect, type LoginSession } from './connect.js'
+import { connectingText, decideAgentProof, decideConnect, destinationName, type LoginSession } from './connect.js'
 
 export type Exchange = (code: string) => Promise<{ subject: string; label: string }>
 
@@ -159,6 +159,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (auth && isProvider(auth[1])) return handleAuth(req, res, ctx, url, auth[1])
     const callback = /^\/auth\/(google|apple|facebook)\/callback$/.exec(path)
     if (callback && isProvider(callback[1])) return await handleCallback(req, res, ctx, url, callback[1])
+    const mark = /^\/marks\/(google|apple|facebook)\.svg$/.exec(path)
+    if (mark && isProvider(mark[1])) return await handleMark(req, res, mark[1])
     sendText(res, 404, 'not found')
   } catch (error) {
     if (error instanceof HttpError) {
@@ -439,14 +441,50 @@ function connectQuery(url: URL): ConnectQuery | null {
   return { audience, returnUrl, site }
 }
 
+const MARK_FILES = {
+  google: fileURLToPath(new URL('../assets/google.svg', import.meta.url)),
+  apple: fileURLToPath(new URL('../assets/apple.svg', import.meta.url)),
+  facebook: fileURLToPath(new URL('../assets/facebook.svg', import.meta.url)),
+} as const
+
+async function handleMark(req: IncomingMessage, res: ServerResponse, provider: ProviderName): Promise<void> {
+  if (req.method !== 'GET') return sendText(res, 405, 'method not allowed', { allow: 'GET' })
+  const bytes = await readFile(MARK_FILES[provider])
+  res.writeHead(200, {
+    'content-type': 'image/svg+xml',
+    'content-length': String(bytes.length),
+    'cache-control': 'no-store',
+  })
+  res.end(bytes)
+}
+
+const ACCOUNT_STYLE =
+  '.accounts{display:flex;flex-direction:column;gap:12px;max-width:320px}' +
+  '.accounts a{display:flex;align-items:center;box-sizing:border-box;width:320px;height:40px;padding:0 12px;gap:12px;border:1px solid #747775;border-radius:4px;background:#fff;color:#1f1f1f;font:14px/20px sans-serif;text-decoration:none}' +
+  '.accounts img{width:20px;height:20px;object-fit:contain;flex:none}' +
+  '.accounts img.apple{width:40px;height:40px}'
+
 function providersPage(ctx: Ctx, query: ConnectQuery): string {
   const links = PROVIDERS.flatMap((provider) => {
     if (!configured(ctx, provider)) return []
-    return [{ href: authPath(provider, query), name: NAMES[provider] }]
+    return [{ href: authPath(provider, query), provider, label: `Continue with ${NAMES[provider]}` }]
   })
-  const items = links.map((link) => `<a href="${escapeHtml(link.href)}">${escapeHtml(link.name)}</a>`).join('')
+  const buttons = links
+    .map((link) => {
+      const href = escapeHtml(link.href)
+      const label = escapeHtml(link.label)
+      const mark = link.provider === 'apple' ? '40' : '20'
+      return `<a class="account" href="${href}"><img class="${link.provider}" src="/marks/${link.provider}.svg" alt="" width="${mark}" height="${mark}">${label}</a>`
+    })
+    .join('')
   const test = ctx.testLogin ? testLoginForm(query) : ''
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Sign in</title><nav>${items}${test}</nav></html>`
+  const body =
+    links.length === 0 && !ctx.testLogin
+      ? '<h1>Sign in</h1><p>Sign-in is not set up.</p><p>no-provider</p>'
+      : links.length === 0
+        ? `<h1>Sign in</h1>${test}`
+        : `<h1>Sign in</h1><p>To continue to ${escapeHtml(destinationName(query.audience, query.site))}, choose an account. You sign in on that site, then come back here.</p><div class="accounts">${buttons}</div>${test}`
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Sign in</title><style>${ACCOUNT_STYLE}</style>${body}</html>`
 }
 
 function testLoginForm(query: ConnectQuery): string {

@@ -78,6 +78,14 @@ A push to `master` deploys after the test workflow passes. The GitHub secret `FL
 
 A generated file writes the secrets, the session path, the key id, and `SIGNET_TEST`, and does not write host, port, or issuer.
 
+## Warnings
+
+The connect page shows a warning code when nobody can choose an account because this process is not configured. The code is on the page. This table is the list.
+
+| Code | When it appears | What to do |
+| --- | --- | --- |
+| `no-provider` | No provider client id is set, and `SIGNET_TEST` is not `1`. The page has no account button. | Set `SIGNET_GOOGLE_CLIENT_ID`, `SIGNET_APPLE_CLIENT_ID`, or `SIGNET_FACEBOOK_CLIENT_ID`. A client secret without its client id leaves this code in place. On the public host, deploy the secrets so the machine boots with the new values. |
+
 Redirect URIs to register with each provider, using the issuer:
 
 - `<issuer>/auth/google/callback`
