@@ -1093,6 +1093,187 @@ describe('login origin', () => {
       await sessions.remove()
     }
   })
+
+  it('drops the previous account when Apple posts the callback', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const derivationKey = new TextEncoder().encode('0123456789abcdef0123456789abcdef')
+    let subject = 'ada'
+    let label = 'Ada'
+    const sessions = await tempSessions()
+    const server = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey,
+      now: () => 1_700_000_000,
+      testLogin: true,
+      sessionsFile: sessions.file,
+      providers: {
+        apple: {
+          clientId: 'apple-client',
+          authorizeUrl: 'https://apple.test/auth',
+          exchange: async () => ({ subject, label }),
+        },
+      },
+    })
+    const connect = new URL('/connect', server.url)
+    connect.searchParams.set('audience', 'https://friends.example')
+    connect.searchParams.set('return', 'https://friends.example/room')
+    const begin = async (session: string) => {
+      const start = new URL('/auth/apple', server.url)
+      start.searchParams.set('audience', 'https://friends.example')
+      start.searchParams.set('return', 'https://friends.example/room')
+      const began = await fetch(start, { redirect: 'manual', headers: { cookie: `valar_session=${session}` } })
+      const state = new URL(began.headers.get('location') ?? '').searchParams.get('state') ?? ''
+      return { began, state, nonce: cookieValue(setCookie(began, 'valar_oauth')) }
+    }
+    const applePost = (state: string, fields: Record<string, string>, cookie: string) => {
+      return fetch(new URL('/auth/apple/callback', server.url), {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', cookie },
+        body: new URLSearchParams(fields).toString(),
+      })
+    }
+    try {
+      const minted = await fetch(new URL('/test-login', server.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'google', subject: 'ada', label: 'Ada' }),
+      })
+      const firstId = cookieValue(setCookie(minted, 'valar_session'))
+      const started = await begin(firstId)
+      expect(started.began.status).toBe(302)
+      const prior = setCookie(started.began, 'valar_prior')
+      expect(cookieValue(prior)).toBe(firstId)
+      expect(cookieFlags(prior)).toContain('HttpOnly')
+      expect(cookieFlags(prior)).toContain('Secure')
+      expect(cookieFlags(prior)).toContain('SameSite=None')
+      expect(prior).toContain('Max-Age=600')
+      expect(started.state).toBeTruthy()
+      expect(started.state).not.toContain(firstId)
+
+      const failed = await applePost(
+        started.state,
+        { error: 'access_denied', state: started.state },
+        `valar_oauth=${started.nonce}; valar_prior=${firstId}`,
+      )
+      expect(failed.status).toBe(303)
+      expect(new URL(failed.headers.get('location') ?? '').hash).toBe('#signet-identity=failed')
+      expect(setCookie(failed, 'valar_prior')).toContain('Max-Age=0')
+      const kept = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, { label: string }>
+      expect(kept[firstId]?.label).toBe('Ada')
+      const still = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${firstId}` } })
+      expect(await still.text()).toContain('Signed in as Ada.')
+
+      subject = 'bea'
+      label = 'Bea'
+      const again = await begin(firstId)
+      const posted = await applePost(
+        again.state,
+        { code: 'ok', state: again.state },
+        `valar_oauth=${again.nonce}; valar_prior=${firstId}`,
+      )
+      expect(posted.status).toBe(200)
+      const secondId = cookieValue(setCookie(posted, 'valar_session'))
+      expect(secondId).not.toBe(firstId)
+      expect(setCookie(posted, 'valar_prior')).toContain('Max-Age=0')
+      const replaced = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, { label: string }>
+      expect(replaced[firstId]).toBeUndefined()
+      expect(Object.keys(replaced)).toEqual([secondId])
+      const old = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${firstId}` } })
+      expect(await old.text()).toContain('<h1>Sign in</h1>')
+
+      const extra = await fetch(new URL('/test-login', server.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'google', subject: 'cy', label: 'Cy' }),
+      })
+      const thirdId = cookieValue(setCookie(extra, 'valar_session'))
+      expect(thirdId).not.toBe(secondId)
+      const both = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, unknown>
+      expect(Object.keys(both).sort()).toEqual([secondId, thirdId].sort())
+      subject = 'dee'
+      label = 'Dee'
+      const third = await begin(secondId)
+      const dropped = await applePost(
+        third.state,
+        { code: 'ok', state: third.state },
+        `valar_oauth=${third.nonce}; valar_session=${secondId}; valar_prior=${thirdId}`,
+      )
+      expect(dropped.status).toBe(200)
+      const fourthId = cookieValue(setCookie(dropped, 'valar_session'))
+      const left = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, unknown>
+      expect(Object.keys(left)).toEqual([fourthId])
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
+
+  it('rejects a present but invalid test-login query without dropping the account', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const sessions = await tempSessions()
+    const server = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+      now: () => 1_700_000_000,
+      testLogin: true,
+      providers: {},
+      sessionsFile: sessions.file,
+    })
+    try {
+      const minted = await fetch(new URL('/test-login', server.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'google', subject: 'ada', label: 'Ada' }),
+      })
+      const firstId = cookieValue(setCookie(minted, 'valar_session'))
+      const bad = new URL('/test-login', server.url)
+      bad.searchParams.set('audience', 'https://friends.example')
+      bad.searchParams.set('return', 'https://friends.example/room')
+      bad.searchParams.set('site', 'Friends\nroom')
+      const rejected = await fetch(bad, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          cookie: `valar_session=${firstId}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ provider: 'google', subject: 'bea', label: 'Bea' }),
+      })
+      expect(rejected.status).toBe(400)
+      expect(await rejected.text()).toBe('rejected')
+      expect(rejected.headers.get('location')).toBeNull()
+      const kept = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, { label: string }>
+      expect(Object.keys(kept)).toEqual([firstId])
+      expect(kept[firstId]?.label).toBe('Ada')
+
+      const again = await fetch(new URL('/test-login', server.url), {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          cookie: `valar_session=${firstId}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ provider: 'google', subject: 'bea', label: 'Bea' }),
+      })
+      expect(again.status).toBe(204)
+      const nextId = cookieValue(setCookie(again, 'valar_session'))
+      expect(nextId).not.toBe(firstId)
+      const replaced = JSON.parse(await readFile(sessions.file, 'utf8')) as Record<string, { label: string }>
+      expect(Object.keys(replaced)).toEqual([nextId])
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
 })
 
 describe('decideAgentProof', () => {

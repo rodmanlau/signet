@@ -33,6 +33,8 @@ export type LoginServerOptions = {
 const PROVIDERS: ProviderName[] = ['google', 'apple', 'facebook']
 const SESSION_COOKIE = 'valar_session'
 const OAUTH_COOKIE = 'valar_oauth'
+// Session id to revoke. Apple's cross-site POST does not send the Lax session cookie.
+const PRIOR_COOKIE = 'valar_prior'
 const SESSION_MAX_AGE = 400 * 24 * 60 * 60
 // Apple posts the callback across sites. Lax would drop the nonce on that POST.
 const OAUTH_FLAGS = 'HttpOnly; Secure; SameSite=None; Path=/'
@@ -221,7 +223,11 @@ async function handleLogout(req: IncomingMessage, res: ServerResponse, ctx: Ctx)
     if (stored) ctx.sessions.set(stored.id, { provider: stored.provider, subject: stored.subject, label: stored.label })
     throw error
   }
-  sendEmpty(res, 204, [clearCookie(SESSION_COOKIE, sessionFlags(ctx.issuer)), clearCookie(OAUTH_COOKIE, OAUTH_FLAGS)])
+  sendEmpty(res, 204, [
+    clearCookie(SESSION_COOKIE, sessionFlags(ctx.issuer)),
+    clearCookie(OAUTH_COOKIE, OAUTH_FLAGS),
+    clearCookie(PRIOR_COOKIE, OAUTH_FLAGS),
+  ])
 }
 
 function acceptedQuery(ctx: Ctx, url: URL): ConnectQuery | null {
@@ -281,6 +287,7 @@ async function handleSignOut(req: IncomingMessage, res: ServerResponse, ctx: Ctx
   sendRedirect(res, 303, location, 'signed-out', [
     clearCookie(SESSION_COOKIE, sessionFlags(ctx.issuer)),
     clearCookie(OAUTH_COOKIE, OAUTH_FLAGS),
+    clearCookie(PRIOR_COOKIE, OAUTH_FLAGS),
   ])
 }
 
@@ -289,7 +296,10 @@ async function handleTestLogin(req: IncomingMessage, res: ServerResponse, ctx: C
   if (req.method !== 'POST') return sendText(res, 405, 'method not allowed', { allow: 'POST' })
   const session = await readTestSession(req)
   if (!session) return sendText(res, 400, 'bad request')
+  const named = url.searchParams.has('audience') || url.searchParams.has('return') || url.searchParams.has('site')
   const query = connectQuery(url)
+  // No audience, return, or site mints a session. A present but unusable query must not.
+  if (named && !query) return sendText(res, 400, 'rejected')
   if (query) {
     const decision = decideConnect({
       session,
@@ -429,7 +439,11 @@ function handleAuth(req: IncomingMessage, res: ServerResponse, ctx: Ctx, url: UR
     state,
     provider === 'google' ? prompt : undefined,
   )
-  sendRedirect(res, 302, location, '', [`${OAUTH_COOKIE}=${encodeURIComponent(nonce)}; ${OAUTH_FLAGS}; Max-Age=600`])
+  const stored = readSession(ctx, req.headers.cookie)
+  const cookies = [`${OAUTH_COOKIE}=${encodeURIComponent(nonce)}; ${OAUTH_FLAGS}; Max-Age=600`]
+  if (stored) cookies.push(`${PRIOR_COOKIE}=${encodeURIComponent(stored.id)}; ${OAUTH_FLAGS}; Max-Age=600`)
+  else cookies.push(clearCookie(PRIOR_COOKIE, OAUTH_FLAGS))
+  sendRedirect(res, 302, location, '', cookies)
 }
 
 async function handleCallback(
@@ -477,28 +491,34 @@ async function handleCallback(
   })
   if (decision.type !== 'redirect') return failLogin(res, pending)
   const previous = readSession(ctx, req.headers.cookie)
+  const prior = readCookie(req.headers.cookie, PRIOR_COOKIE)
+  const drop: string[] = []
+  if (previous) drop.push(previous.id)
+  if (prior !== undefined && ID_TOKEN.test(prior) && !drop.includes(prior)) drop.push(prior)
   const text = connectingText(pending.audience, session.label, pending.site)
   sendHtml(res, 200, connectingPage(text, decision.location), [
-    await issueSession(ctx, session, previous?.id),
+    await issueSession(ctx, session, drop),
     clearCookie(OAUTH_COOKIE, OAUTH_FLAGS),
+    clearCookie(PRIOR_COOKIE, OAUTH_FLAGS),
   ])
 }
 
 function failLogin(res: ServerResponse, pending: PendingLogin): void {
+  const prior = clearCookie(PRIOR_COOKIE, OAUTH_FLAGS)
   let location: string
   try {
     const url = new URL(pending.returnUrl)
     if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== pending.audience) {
-      sendText(res, 400, 'rejected')
+      sendText(res, 400, 'rejected', undefined, [prior])
       return
     }
     url.hash = 'signet-identity=failed'
     location = url.href
   } catch {
-    sendText(res, 400, 'rejected')
+    sendText(res, 400, 'rejected', undefined, [prior])
     return
   }
-  sendRedirect(res, 303, location, 'failed', [clearCookie(OAUTH_COOKIE, OAUTH_FLAGS)])
+  sendRedirect(res, 303, location, 'failed', [clearCookie(OAUTH_COOKIE, OAUTH_FLAGS), prior])
 }
 
 function connectQuery(url: URL): ConnectQuery | null {
@@ -655,16 +675,21 @@ function authorizeLocation(
   return url.href
 }
 
-async function issueSession(ctx: Ctx, session: LoginSession, previousId?: string): Promise<string> {
+async function issueSession(ctx: Ctx, session: LoginSession, previousId?: string | string[]): Promise<string> {
   const id = randomBytes(16).toString('base64url')
-  const previous = previousId === undefined ? undefined : ctx.sessions.get(previousId)
-  if (previousId !== undefined) ctx.sessions.delete(previousId)
+  const ids = previousId === undefined ? [] : Array.isArray(previousId) ? previousId : [previousId]
+  const saved: Array<[string, LoginSession]> = []
+  for (const prior of new Set(ids)) {
+    const record = ctx.sessions.get(prior)
+    if (record !== undefined) saved.push([prior, record])
+    ctx.sessions.delete(prior)
+  }
   ctx.sessions.set(id, session)
   try {
     await persist(ctx)
   } catch (error) {
     ctx.sessions.delete(id)
-    if (previous !== undefined && previousId !== undefined) ctx.sessions.set(previousId, previous)
+    for (const [prior, record] of saved) ctx.sessions.set(prior, record)
     throw error
   }
   return sessionCookie(id, ctx.issuer)
