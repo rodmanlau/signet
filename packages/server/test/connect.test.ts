@@ -757,6 +757,101 @@ describe('login origin', () => {
       else process.env.VALAR_LOGIN_SESSIONS = previousOld
     }
   })
+
+  it('signs the browser out from the sign-out page', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const sessions = await tempSessions()
+    const server = await startLogin({
+      port: 0,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      publicKey,
+      derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+      now: () => 1_700_000_000,
+      testLogin: true,
+      providers: {},
+      sessionsFile: sessions.file,
+    })
+    try {
+      const minted = await fetch(new URL('/test-login', server.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'google', subject: 'ada', label: 'A&B <ada>' }),
+      })
+      const session = cookieValue(setCookie(minted, 'valar_session'))
+      const signOut = new URL('/sign-out', server.url)
+      signOut.searchParams.set('audience', 'https://friends.example')
+      signOut.searchParams.set('return', 'https://friends.example/room?x=1#keep')
+      const page = await fetch(signOut, { headers: { cookie: `valar_session=${session}` } })
+      expect(page.status).toBe(200)
+      expect(page.headers.getSetCookie().some((line) => line.startsWith('valar_session='))).toBe(false)
+      const html = await page.text()
+      expect(html).toContain('<title>Sign out</title>')
+      expect(html).toContain('<h1>Sign out</h1>')
+      expect(html).toContain('You are signed in as A&amp;B &lt;ada&gt;.')
+      expect(html).toContain('<button type="submit">Sign out</button>')
+      expect(html).toContain('method="post"')
+      expect(html).toContain('action="/sign-out?')
+      expect(html).toContain('audience=https%3A%2F%2Ffriends.example')
+      expect(html).not.toContain('Continue with Google')
+      expect(html).not.toContain('Stay signed in')
+      expect(html).not.toContain('signet-identity=cancelled')
+
+      const connect = new URL('/connect', server.url)
+      connect.searchParams.set('audience', 'https://friends.example')
+      connect.searchParams.set('return', 'https://friends.example/room')
+      const still = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${session}` } })
+      expect(still.status).toBe(200)
+      expect(await still.text()).toContain('Signed in as A&amp;B &lt;ada&gt;.')
+
+      const evil = new URL('/sign-out', server.url)
+      evil.searchParams.set('audience', 'https://friends.example')
+      evil.searchParams.set('return', 'https://evil.example/room')
+      const rejected = await fetch(evil, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { cookie: `valar_session=${session}` },
+      })
+      expect(rejected.status).toBe(400)
+      expect(rejected.headers.get('location')).toBeNull()
+      const kept = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${session}` } })
+      expect(await kept.text()).toContain('Signed in as A&amp;B &lt;ada&gt;.')
+
+      const other = await fetch(signOut, { method: 'PUT', redirect: 'manual' })
+      expect(other.status).toBe(405)
+      expect(other.headers.get('allow')).toBe('GET, POST')
+
+      const posted = await fetch(signOut, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { cookie: `valar_session=${session}` },
+      })
+      expect(posted.status).toBe(303)
+      expect(await posted.text()).toBe('signed-out')
+      const back = new URL(posted.headers.get('location') ?? '')
+      expect(back.origin).toBe('https://friends.example')
+      expect(back.pathname).toBe('/room')
+      expect(back.search).toBe('?x=1')
+      expect(back.hash).toBe('#signet-identity=signed-out')
+      const cleared = setCookie(posted, 'valar_session')
+      expect(cleared).toContain('Max-Age=0')
+      expect(setCookie(posted, 'valar_oauth')).toContain('Max-Age=0')
+
+      const after = await fetch(connect, { redirect: 'manual', headers: { cookie: `valar_session=${session}` } })
+      expect(await after.text()).toContain('<h1>Sign in</h1>')
+
+      const gone = await fetch(signOut, { redirect: 'manual' })
+      expect(gone.status).toBe(303)
+      expect(new URL(gone.headers.get('location') ?? '').hash).toBe('#signet-identity=signed-out')
+      const gonePost = await fetch(signOut, { method: 'POST', redirect: 'manual' })
+      expect(gonePost.status).toBe(303)
+      expect(new URL(gonePost.headers.get('location') ?? '').hash).toBe('#signet-identity=signed-out')
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
 })
 
 describe('decideAgentProof', () => {

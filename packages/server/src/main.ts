@@ -152,6 +152,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const path = url.pathname
     if (path === '/connect') return await handleConnect(req, res, ctx, url)
     if (path === '/.well-known/signet-keys') return handleKeys(req, res, ctx)
+    if (path === '/sign-out') return await handleSignOut(req, res, ctx, url)
     if (path === '/logout') return await handleLogout(req, res, ctx)
     if (path === '/test-login') return await handleTestLogin(req, res, ctx, url)
     if (path === '/agent-proof') return await handleAgentProof(req, res, ctx)
@@ -220,6 +221,66 @@ async function handleLogout(req: IncomingMessage, res: ServerResponse, ctx: Ctx)
     throw error
   }
   sendEmpty(res, 204, [clearCookie(SESSION_COOKIE, sessionFlags(ctx.issuer)), clearCookie(OAUTH_COOKIE, OAUTH_FLAGS)])
+}
+
+function acceptedQuery(ctx: Ctx, url: URL): ConnectQuery | null {
+  const query = connectQuery(url)
+  if (!query) return null
+  const decision = decideConnect({
+    session: null,
+    audience: query.audience,
+    returnUrl: query.returnUrl,
+    now: ctx.now(),
+    issuer: ctx.issuer,
+    keyId: ctx.keyId,
+    privateKey: ctx.privateKey,
+    derivationKey: ctx.derivationKey,
+  })
+  if (decision.type === 'reject') return null
+  return query
+}
+
+function signOutLocation(query: ConnectQuery): string {
+  const url = new URL(query.returnUrl)
+  url.hash = 'signet-identity=signed-out'
+  return url.href
+}
+
+function signOutPage(label: string, query: ConnectQuery): string {
+  const action = escapeHtml(queryPath('/sign-out', query))
+  return (
+    '<!doctype html><html lang="en"><meta charset="utf-8"><title>Sign out</title><h1>Sign out</h1>' +
+    `<p>You are signed in as ${escapeHtml(label)}.</p>` +
+    `<form method="post" action="${action}"><button type="submit">Sign out</button></form></html>`
+  )
+}
+
+async function handleSignOut(req: IncomingMessage, res: ServerResponse, ctx: Ctx, url: URL): Promise<void> {
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    return sendText(res, 405, 'method not allowed', { allow: 'GET, POST' })
+  }
+  const query = acceptedQuery(ctx, url)
+  if (!query) return sendText(res, 400, 'rejected')
+  const stored = readSession(ctx, req.headers.cookie)
+  if (req.method === 'GET' && stored) {
+    sendHtml(res, 200, signOutPage(stored.label, query))
+    return
+  }
+  if (req.method === 'POST' && stored) {
+    ctx.sessions.delete(stored.id)
+    try {
+      await persist(ctx)
+    } catch (error) {
+      ctx.sessions.set(stored.id, { provider: stored.provider, subject: stored.subject, label: stored.label })
+      throw error
+    }
+  }
+  const location = signOutLocation(query)
+  if (/[\r\n]/.test(location)) return sendText(res, 400, 'rejected')
+  sendRedirect(res, 303, location, 'signed-out', [
+    clearCookie(SESSION_COOKIE, sessionFlags(ctx.issuer)),
+    clearCookie(OAUTH_COOKIE, OAUTH_FLAGS),
+  ])
 }
 
 async function handleTestLogin(req: IncomingMessage, res: ServerResponse, ctx: Ctx, url: URL): Promise<void> {

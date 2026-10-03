@@ -111,6 +111,7 @@ Proofs expire 15 minutes after Signet signs them. Checking one is covered in the
 | `GET /` | `404` and the text `not found`. |
 | `GET /.well-known/signet-keys` | `{ "keys": [ { "id", "publicKey" } ] }`. Store the inner array. |
 | `GET /connect?audience=<origin>&return=<url>` | Optional `site` is the name shown on the page. A non-empty value replaces the audience hostname. Without a session, the response is the sign-in page. With a session, Signet shows a short confirmation, then redirects to `return` with the proof in `#signet-proof=`. The return URL's origin must equal `audience`. A failed sign-in redirects to `return` with `#signet-identity=failed`. |
+| `GET /sign-out?audience=<origin>&return=<url>` | Optional `site`. With a session, the page says `You are signed in as {label}.` and its button posts to this URL. The POST ends the browser session and redirects to `return` with `#signet-identity=signed-out`. With no session, the GET redirects there. The return URL's origin must equal `audience`. |
 | `POST /agent-proof` | An agent asks for a proof and signs the request with its own key. This server stores nothing about that agent. |
 | `POST /logout` | Ends the browser session. |
 
