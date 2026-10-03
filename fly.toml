@@ -1,4 +1,4 @@
-app = "agenticage-signet"
+app = "signet"
 primary_region = "iad"
 
 [build]
@@ -9,7 +9,7 @@ primary_region = "iad"
   SIGNET_PORT = "8787"
   SIGNET_SESSIONS = "/data/sessions.json"
   SIGNET_KEY_ID = "k1"
-  SIGNET_ISSUER = "https://agenticage-signet.fly.dev"
+  SIGNET_ISSUER = "https://signet.fly.dev"
 
 [http_service]
   internal_port = 8787
