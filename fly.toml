@@ -1,34 +1,39 @@
-app = "agenticage-signet"
-primary_region = "iad"
+# fly.toml app configuration file generated for signet on 2026-10-03T01:32:57Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'signet'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
+
+[deploy]
+  strategy = 'rolling'
 
 [env]
-  SIGNET_HOST = "0.0.0.0"
-  SIGNET_PORT = "8787"
-  SIGNET_SESSIONS = "/data/sessions.json"
-  SIGNET_KEY_ID = "k1"
-  SIGNET_ISSUER = "https://agenticage-signet.fly.dev"
+  SIGNET_HOST = '0.0.0.0'
+  SIGNET_ISSUER = 'https://agenticage-signet.fly.dev'
+  SIGNET_KEY_ID = 'k1'
+  SIGNET_PORT = '8787'
+  SIGNET_SESSIONS = '/data/sessions.json'
+
+[[mounts]]
+  source = 'signet_data'
+  destination = '/data'
+  initial_size = '1gb'
 
 [http_service]
   internal_port = 8787
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = 'off'
   auto_start_machines = false
   min_machines_running = 1
 
-[[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
-
-[mounts]
-  source = "signet_data"
-  destination = "/data"
-  initial_size = "1gb"
-
-[deploy]
-  strategy = "rolling"
-
 [[restart]]
-  policy = "always"
+  policy = 'always'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
