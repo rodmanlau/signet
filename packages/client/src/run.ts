@@ -7,7 +7,11 @@ import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } fro
 const USAGE = [
   'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
   'npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>',
+  'npm start -w @agenticage/client -- --sign-out <signet-origin> <audience>',
+  'npm start -w @agenticage/client -- --switch <signet-origin> <audience> <public-key-file>',
 ]
+
+const MODES = ['--agent', '--human', '--sign-out', '--switch'] as const
 
 const PAGE = `<!DOCTYPE html>
 <meta charset="utf-8">
@@ -27,18 +31,24 @@ type Heard =
   | { kind: 'listen'; reason: string }
 
 export async function runSignetClient(argv: string[], write: Write): Promise<number> {
-  const mode = argv[0]
-  const both = argv.includes('--agent') && argv.includes('--human')
-  if ((mode !== '--agent' && mode !== '--human') || both) return writeUsage(write)
-  if (mode === '--agent' && argv.length !== 5) return writeUsage(write)
-  if (mode === '--human' && argv.length !== 4) return writeUsage(write)
-  if (mode === '--agent') return runAgent(argv[1] ?? '', argv[2] ?? '', argv[3] ?? '', argv[4] ?? '', write)
-  return runHuman(argv[1] ?? '', argv[2] ?? '', argv[3] ?? '', write)
+  const chosen = MODES.filter((mode) => argv.includes(mode))
+  if (chosen.length !== 1 || argv[0] !== chosen[0]) return writeUsage(write)
+  const mode = chosen[0]
+  if (mode === '--agent') {
+    if (argv.length !== 5) return writeUsage(write)
+    return runAgent(argv[1] ?? '', argv[2] ?? '', argv[3] ?? '', argv[4] ?? '', write)
+  }
+  if (mode === '--sign-out') {
+    if (argv.length !== 3) return writeUsage(write)
+    return runBrowser(argv[1] ?? '', argv[2] ?? '', '/sign-out', undefined, write)
+  }
+  if (argv.length !== 4) return writeUsage(write)
+  const path = mode === '--human' ? '/connect' : '/switch'
+  return runBrowser(argv[1] ?? '', argv[2] ?? '', path, argv[3] ?? '', write)
 }
 
 function writeUsage(write: Write): number {
-  write(USAGE[0] ?? '')
-  write(USAGE[1] ?? '')
+  for (const line of USAGE) write(line)
   return 1
 }
 
@@ -120,7 +130,13 @@ async function runAgent(
   return finishProof(proof, origin, audience, publicKeyFile, 7, write)
 }
 
-async function runHuman(origin: string, audience: string, publicKeyFile: string, write: Write): Promise<number> {
+async function runBrowser(
+  origin: string,
+  audience: string,
+  path: '/connect' | '/sign-out' | '/switch',
+  publicKeyFile: string | undefined,
+  write: Write,
+): Promise<number> {
   if (!isOrigin(origin)) {
     write(`1. Signet origin: ${origin}. bad origin`)
     return 1
@@ -133,10 +149,18 @@ async function runHuman(origin: string, audience: string, publicKeyFile: string,
   }
   write(`2. Audience: ${audience}`)
 
-  const heard = await listenForProof(url, audience, origin, write)
+  const heard = await listenForReturn(url, audience, origin, path, write)
   if (heard.kind === 'listen') {
     write(`3. Listening on ${audience}. ${heard.reason}`)
     return 1
+  }
+  if (publicKeyFile === undefined) {
+    if (heard.kind === 'proof') {
+      write('5. Redirect. proof')
+      return 1
+    }
+    write(`5. Redirect. ${heard.reason}`)
+    return heard.reason === '#signet-identity=signed-out' ? 0 : 1
   }
   if (heard.kind === 'redirect') {
     write(`5. Redirect. ${heard.reason}`)
@@ -146,7 +170,13 @@ async function runHuman(origin: string, audience: string, publicKeyFile: string,
   return finishProof(heard.bytes, origin, audience, publicKeyFile, 6, write)
 }
 
-function listenForProof(url: URL, audience: string, origin: string, write: Write): Promise<Heard> {
+function listenForReturn(
+  url: URL,
+  audience: string,
+  origin: string,
+  path: '/connect' | '/sign-out' | '/switch',
+  write: Write,
+): Promise<Heard> {
   return new Promise((resolve) => {
     let settled = false
     let listening = false
@@ -203,7 +233,7 @@ function listenForProof(url: URL, audience: string, origin: string, write: Write
       params.set('audience', audience)
       params.set('return', `${audience}/`)
       write(`3. Listening on ${audience}`)
-      write(`4. Open ${origin}/connect?${params.toString()}`)
+      write(`4. Open ${origin}${path}?${params.toString()}`)
     })
   })
 }

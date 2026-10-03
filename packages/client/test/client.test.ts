@@ -12,6 +12,8 @@ import { runSignetClient } from '../src/run.js'
 const USAGE = [
   'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
   'npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>',
+  'npm start -w @agenticage/client -- --sign-out <signet-origin> <audience>',
+  'npm start -w @agenticage/client -- --switch <signet-origin> <audience> <public-key-file>',
 ]
 
 async function freePort(): Promise<number> {
@@ -31,8 +33,14 @@ async function waitFor(lines: string[], prefix: string): Promise<void> {
   }
 }
 
-it('prints both commands when the switch is missing or repeated', async () => {
-  for (const argv of [[], ['--agent', '--human'], ['--human', 'http://127.0.0.1:8787', 'http://127.0.0.1:9', '--agent']]) {
+it('prints every command when the mode is missing or repeated', async () => {
+  for (const argv of [
+    [],
+    ['--agent', '--human'],
+    ['--human', 'http://127.0.0.1:8787', 'http://127.0.0.1:9', '--agent'],
+    ['--sign-out', '--switch'],
+    ['--sign-out', 'http://127.0.0.1:8787'],
+  ]) {
     const lines: string[] = []
     expect(await runSignetClient(argv, (line) => lines.push(line))).toBe(1)
     expect(lines).toEqual(USAGE)
@@ -294,6 +302,96 @@ it('stops on a human failure fragment and on an audience it cannot hear', async 
         `2. Audience: ${bad}. The proof would be returned to that origin.`,
       ])
     }
+  } finally {
+    await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, 200))])
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+it('prints the sign-out URL and stops after the signed-out fragment', async () => {
+  const audience = `http://127.0.0.1:${await freePort()}`
+  const signet = 'http://127.0.0.1:8787'
+  const lines: string[] = []
+  const pending = runSignetClient(['--sign-out', signet, audience], (line) => lines.push(line))
+  try {
+    await waitFor(lines, '4. Open')
+    expect(lines[3]).toBe(
+      `4. Open ${signet}/sign-out?audience=${encodeURIComponent(audience)}&return=${encodeURIComponent(`${audience}/`)}`,
+    )
+    const posted = await fetch(audience, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: '#signet-identity=signed-out',
+    })
+    expect(posted.status).toBe(204)
+    expect(await pending).toBe(0)
+    expect(lines[4]).toBe('5. Redirect. #signet-identity=signed-out')
+    expect(lines).toHaveLength(5)
+  } finally {
+    await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, 200))])
+  }
+})
+
+it('reports a proof posted to sign-out without printing the token', async () => {
+  const { secretKey, publicKey } = await generateKeyPair()
+  const audience = `http://127.0.0.1:${await freePort()}`
+  const signet = 'http://127.0.0.1:8787'
+  const now = Math.floor(Date.now() / 1000)
+  const proof = signProof(
+    { keyId: 'k1', issuer: signet, identity: 'ab'.repeat(32), audience, issuedAt: now, expiresAt: now + 60 },
+    secretKey,
+  )
+  const token = Buffer.from(proof).toString('base64url')
+  const lines: string[] = []
+  const pending = runSignetClient(['--sign-out', signet, audience], (line) => lines.push(line))
+  try {
+    await waitFor(lines, '4. Open')
+    const posted = await fetch(audience, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: `#signet-proof=${token}`,
+    })
+    expect(posted.status).toBe(204)
+    expect(await pending).toBe(1)
+    expect(lines[4]).toBe('5. Redirect. proof')
+    expect(lines.join('\n')).not.toContain(token)
+    expect(lines.join('\n')).not.toContain(Buffer.from(publicKey).toString('base64'))
+  } finally {
+    await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, 200))])
+  }
+})
+
+it('prints the switch URL and checks the proof the way human sign-in does', async () => {
+  const { secretKey, publicKey } = await generateKeyPair()
+  const audience = `http://127.0.0.1:${await freePort()}`
+  const signet = 'http://127.0.0.1:8787'
+  const dir = await mkdtemp(join(tmpdir(), 'signet-client-'))
+  const keyFile = join(dir, 'keys.json')
+  await writeFile(keyFile, JSON.stringify([{ id: 'k1', publicKey: Buffer.from(publicKey).toString('base64') }]))
+  const now = Math.floor(Date.now() / 1000)
+  const identity = 'cd'.repeat(32)
+  const proof = signProof(
+    { keyId: 'k1', issuer: signet, identity, audience, issuedAt: now, expiresAt: now + 60 },
+    secretKey,
+  )
+  const lines: string[] = []
+  const pending = runSignetClient(['--switch', signet, audience, keyFile], (line) => lines.push(line))
+  try {
+    await waitFor(lines, '4. Open')
+    expect(lines[3]).toBe(
+      `4. Open ${signet}/switch?audience=${encodeURIComponent(audience)}&return=${encodeURIComponent(`${audience}/`)}`,
+    )
+    const token = Buffer.from(proof).toString('base64url')
+    const posted = await fetch(audience, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: `#signet-proof=${token}`,
+    })
+    expect(posted.status).toBe(204)
+    expect(await pending).toBe(0)
+    expect(lines[4]).toBe(`5. Redirect. Proof bytes: ${proof.byteLength}`)
+    expect(lines[7]).toBe(`8. Identity: ${identity}`)
+    expect(lines.join('\n')).not.toContain(token)
   } finally {
     await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, 200))])
     await rm(dir, { recursive: true, force: true })

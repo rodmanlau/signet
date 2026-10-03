@@ -118,4 +118,4 @@ Proofs expire 15 minutes after Signet signs them. Checking one is covered in the
 
 The session cookie lasts 400 days. It is marked `Secure` for an `https` issuer and for loopback. For any other `http` issuer it is stored without that mark.
 
-`@agenticage/client` asks this process for one proof and prints each step. It does not print the agent secret or the proof bytes. See the [developer guide](develop.md).
+`@agenticage/client` asks this process for one proof, or sends the browser to sign out or to switch accounts, and prints each step. It does not print the agent secret or the proof bytes. See the [developer guide](develop.md).

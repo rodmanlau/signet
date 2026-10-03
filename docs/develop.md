@@ -47,6 +47,21 @@ When sign-in does not finish, the return URL's fragment is `#signet-identity=fai
 
 An agent does not open this page.
 
+## Sign out or switch
+
+Send the person to one of these. The query is the same as `/connect`: `audience`, `return`, and an optional `site`. The return URL's origin must equal `audience`.
+
+```text
+GET /sign-out?audience=<origin>&return=<url>
+GET /switch?audience=<origin>&return=<url>
+```
+
+`GET /sign-out` shows `You are signed in as {label}.` and a Sign out button. The button posts back to that URL, ends the browser session, and redirects to `return` with `#signet-identity=signed-out`. With no session, the GET redirects there. The browser Back button leaves the session in place.
+
+`GET /switch` shows the same sentence and the configured account buttons. The Google button asks Google to show its account chooser. With no session, Signet shows the sign-in page. A finished sign-in replaces the browser account and returns a proof in `#signet-proof=`. A failed sign-in redirects with `#signet-identity=failed` and leaves the account in place.
+
+A proof the site already holds stays valid until it expires. Signet does not tell other sites.
+
 ## Ask from an agent
 
 The agent holds its own key and sends `POST /agent-proof`, signed with that key. Signet stores nothing about the agent. `signAgentRequest` builds the request. `agentRequestOk` checks one.
@@ -60,8 +75,12 @@ The client asks for one proof and prints each step. It does not print the agent 
 ```text
 npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>
 npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>
+npm start -w @agenticage/client -- --sign-out <signet-origin> <audience>
+npm start -w @agenticage/client -- --switch <signet-origin> <audience> <public-key-file>
 ```
 
 `--human` listens on the audience. The audience must be `http://127.0.0.1:<port>` or `http://localhost:<port>`. Any other audience fails before the listen. The log says the proof would be returned to that origin.
+
+`--sign-out` listens the same way and opens `/sign-out`. The log ends with `Redirect. #signet-identity=signed-out`. `--switch` listens the same way and opens `/switch`. A proof is checked the same way as `--human`.
 
 Running the process, the keys, and the `SIGNET_` settings are in the [administrator guide](admin.md).
