@@ -11,7 +11,7 @@ import { startLogin } from '../../server/src/main.js'
 import { runSignetClient } from '../src/run.js'
 
 const USAGE = [
-  'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
+  'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file> [--label <name>]',
   'npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>',
   'npm start -w @agenticage/client -- --sign-out <signet-origin> <audience>',
   'npm start -w @agenticage/client -- --switch <signet-origin> <audience> <public-key-file>',
@@ -41,6 +41,8 @@ it('prints every command when the mode is missing or repeated', async () => {
     ['--human', 'http://127.0.0.1:8787', 'http://127.0.0.1:9', '--agent'],
     ['--sign-out', '--switch'],
     ['--sign-out', 'http://127.0.0.1:8787'],
+    ['--agent', 'http://127.0.0.1:8787', 'http://127.0.0.1:9', 'agent.key', 'keys.json', 'extra'],
+    ['--agent', 'http://127.0.0.1:8787', 'http://127.0.0.1:9', 'agent.key', 'keys.json', '--label'],
   ]) {
     const lines: string[] = []
     expect(await runSignetClient(argv, (line) => lines.push(line))).toBe(1)
@@ -140,6 +142,107 @@ it('stops after a rejected agent proof', async () => {
     expect(lines[5]).toBe('6. HTTP 400. rejected')
     expect(lines.some((line) => line.startsWith('7.'))).toBe(false)
   } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+it('prints the skill and approve URL, then verifies a proof after Allow', async () => {
+  const { secretKey, publicKey } = await generateKeyPair()
+  const agent = await generateKeyPair()
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const audience = 'http://127.0.0.1:8080'
+  const dir = await mkdtemp(join(tmpdir(), 'signet-client-'))
+  const agentKey = join(dir, 'agent.key')
+  const publicKeys = join(dir, 'keys.json')
+  await writeFile(agentKey, agent.secretKey)
+  await writeFile(publicKeys, JSON.stringify([{ id: 'k1', publicKey: Buffer.from(publicKey).toString('base64') }]))
+  const server = await startLogin({
+    port,
+    host: '127.0.0.1',
+    issuer: origin,
+    keyId: 'k1',
+    privateKey: secretKey,
+    publicKey,
+    derivationKey: new TextEncoder().encode('signet-client-test'),
+    now: () => Math.floor(Date.now() / 1000),
+    testLogin: true,
+    sessionsFile: join(dir, 'sessions.json'),
+  })
+  const lines: string[] = []
+  const pending = runSignetClient(['--agent', origin, audience, agentKey, publicKeys, '--label', 'Cursor'], (line) =>
+    lines.push(line),
+  )
+  try {
+    await waitFor(lines, '9. Open ')
+    const approveUrl = lines.find((line) => line.startsWith('9. Open '))?.slice('9. Open '.length) ?? ''
+    expect(approveUrl.startsWith(`${origin}/agents/approve?ticket=`)).toBe(true)
+    expect(lines.some((line) => line === `6. HTTP 403. Authorization required. Skill: ${origin}/agents/skill`)).toBe(true)
+
+    const cookie = await signIn(origin)
+    const allowPage = await fetch(approveUrl, { headers: { cookie } })
+    expect(allowPage.status).toBe(200)
+    const allowHtml = await allowPage.text()
+    expect(allowHtml).toContain('Allow Cursor')
+    expect(allowHtml).toContain('<button type="submit">Allow</button>')
+
+    const approved = await fetch(approveUrl, { method: 'POST', redirect: 'manual', headers: { cookie } })
+    expect(approved.status).toBe(303)
+    const location = approved.headers.get('location') ?? ''
+    const loopback = new URL(location)
+    expect(loopback.hash).toBe('#signet-agent=allowed')
+    expect(lines.some((line) => line === `7. Listening on ${loopback.origin}`)).toBe(true)
+
+    const page = await fetch(loopback.origin)
+    expect(page.status).toBe(200)
+    const html = await page.text()
+    expect(html).toContain('location.hash')
+    expect(html).toContain('POST')
+    expect(html).toContain('Allowed. You can close this tab.')
+    expect(lines.some((line) => line.startsWith('10. '))).toBe(false)
+
+    const posted = await fetch(loopback.origin, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: loopback.hash,
+    })
+    expect(posted.status).toBe(204)
+    expect(await pending).toBe(0)
+
+    expect(lines[0]).toBe(`1. Signet origin: ${origin}`)
+    expect(lines[1]).toBe(`2. Audience: ${audience}`)
+    expect(lines[2]?.startsWith('3. Agent key: loaded. Public key: ')).toBe(true)
+    expect(lines[3]).toMatch(/^4\. Agent request signed\. issuedAt: \d+$/)
+    expect(lines[4]).toBe(`5. POST ${origin}/agent-proof`)
+    expect(lines[5]).toBe(`6. HTTP 403. Authorization required. Skill: ${origin}/agents/skill`)
+    expect(lines[6]).toBe(`7. Listening on ${loopback.origin}`)
+    expect(lines[7]).toBe(`8. POST ${origin}/agents/ticket`)
+    expect(lines[8]).toBe(`9. Open ${approveUrl}`)
+    expect(lines[9]).toBe('10. Allowed')
+    expect(lines[10]).toMatch(/^11\. Agent request signed\. issuedAt: \d+$/)
+    expect(lines[11]).toBe(`12. POST ${origin}/agent-proof`)
+    expect(lines[12]).toMatch(/^13\. HTTP 200\. Proof bytes: \d+$/)
+    expect(lines[13]).toBe(`14. Audience: ${audience}`)
+    expect(lines[14]).toMatch(/^15\. Expiry: \d+\. Still valid: yes$/)
+    const expected = deriveIdentity(
+      'agent',
+      agentSubject(publicFromLog(lines[2] ?? '')),
+      '127.0.0.1',
+      new TextEncoder().encode('signet-client-test'),
+    )
+    expect(lines[15]).toBe(`16. Identity: ${expected}`)
+    expect(lines).toHaveLength(16)
+    const firstAt = Number(lines[3]?.slice(lines[3].lastIndexOf(' ') + 1))
+    const secondAt = Number(lines[10]?.slice(lines[10].lastIndexOf(' ') + 1))
+    expect(secondAt).toBeGreaterThanOrEqual(firstAt)
+    const secret = new Uint8Array(await readFile(agentKey))
+    const printed = lines.join('\n')
+    expect(printed).not.toContain(Buffer.from(secret).toString('base64'))
+    expect(printed).not.toContain(Buffer.from(secret).toString('hex'))
+    expect(printed).not.toMatch(/[A-Za-z0-9_-]{80,}/)
+  } finally {
+    await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, 200))])
     await server.close()
     await rm(dir, { recursive: true, force: true })
   }
@@ -404,6 +507,19 @@ it('prints the switch URL and checks the proof the way human sign-in does', asyn
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+async function signIn(origin: string): Promise<string> {
+  const res = await fetch(new URL('/test-login', origin), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ provider: 'google', subject: 'ada', label: 'Ada' }),
+  })
+  expect(res.status).toBe(204)
+  const line = res.headers.getSetCookie().find((item) => item.startsWith('valar_session='))
+  expect(line).toBeTruthy()
+  const value = (line ?? '').slice('valar_session='.length).split(';')[0] ?? ''
+  return `valar_session=${value}`
+}
 
 function publicFromLog(line: string): Uint8Array {
   const marker = 'Public key: '

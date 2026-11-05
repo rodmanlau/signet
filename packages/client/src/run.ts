@@ -1,11 +1,11 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } from '@agenticage/proof'
 
 const USAGE = [
-  'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>',
+  'npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file> [--label <name>]',
   'npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>',
   'npm start -w @agenticage/client -- --sign-out <signet-origin> <audience>',
   'npm start -w @agenticage/client -- --switch <signet-origin> <audience> <public-key-file>',
@@ -21,6 +21,16 @@ const PAGE = `<!DOCTYPE html>
 fetch("/", { method: "POST", headers: { "content-type": "text/plain" }, body: location.hash })
 </script>`
 
+const ALLOW_PAGE = `<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Signet</title>
+<p>Allowed. You can close this tab.</p>
+<script>
+fetch("/", { method: "POST", headers: { "content-type": "text/plain" }, body: location.hash })
+</script>`
+
+const DEFAULT_AGENT_LABEL = 'signet-client'
+
 const base64url = /^[A-Za-z0-9_-]+$/
 
 type Write = (line: string) => void
@@ -35,8 +45,9 @@ export async function runSignetClient(argv: string[], write: Write): Promise<num
   if (chosen.length !== 1 || argv[0] !== chosen[0]) return writeUsage(write)
   const mode = chosen[0]
   if (mode === '--agent') {
-    if (argv.length !== 5) return writeUsage(write)
-    return runAgent(argv[1] ?? '', argv[2] ?? '', argv[3] ?? '', argv[4] ?? '', write)
+    const command = agentCommand(argv)
+    if (command === null) return writeUsage(write)
+    return runAgent(command, write)
   }
   if (mode === '--sign-out') {
     if (argv.length !== 3) return writeUsage(write)
@@ -52,13 +63,55 @@ function writeUsage(write: Write): number {
   return 1
 }
 
-async function runAgent(
-  origin: string,
-  audience: string,
-  keyFile: string,
-  publicKeyFile: string,
-  write: Write,
-): Promise<number> {
+type AgentCommand = {
+  origin: string
+  audience: string
+  keyFile: string
+  publicKeyFile: string
+  label: string
+}
+
+type AgentProofBody = {
+  audience: string
+  publicKey: string
+  issuedAt: number
+  signature: string
+}
+
+type SignedAgentFields = {
+  issuedAt: number
+  publicKey: Uint8Array
+  body: AgentProofBody
+}
+
+type ProofPost =
+  | { kind: 'network'; detail: string }
+  | { kind: 'proof'; proof: Uint8Array }
+  | { kind: 'unauthorized'; skill: string }
+  | { kind: 'fail'; status: number; detail: string }
+
+type AllowListener =
+  | { ok: false; reason: string }
+  | { ok: true; origin: string; allowed: Promise<void>; close: () => void }
+
+function agentCommand(argv: string[]): AgentCommand | null {
+  const origin = argv[1] ?? ''
+  const audience = argv[2] ?? ''
+  const keyFile = argv[3] ?? ''
+  const publicKeyFile = argv[4] ?? ''
+  if (argv.length === 5) return { origin, audience, keyFile, publicKeyFile, label: DEFAULT_AGENT_LABEL }
+  if (argv.length === 7 && argv[5] === '--label' && agentLabelOk(argv[6] ?? '')) {
+    return { origin, audience, keyFile, publicKeyFile, label: argv[6] ?? '' }
+  }
+  return null
+}
+
+function agentLabelOk(value: string): boolean {
+  return value.length > 0 && value.length <= 200 && !/[\r\n\0]/.test(value)
+}
+
+async function runAgent(command: AgentCommand, write: Write): Promise<number> {
+  const { origin, audience, keyFile, publicKeyFile, label } = command
   if (!isOrigin(origin)) {
     write(`1. Signet origin: ${origin}. bad origin`)
     return 1
@@ -78,56 +131,197 @@ async function runAgent(
     return 1
   }
 
-  const issuedAt = Math.floor(Date.now() / 1000)
-  let signed: { publicKey: Uint8Array; signature: Uint8Array }
+  let signed: SignedAgentFields
   try {
-    signed = signAgentRequest(audience, loaded.secret, issuedAt)
+    signed = signAgentFields(audience, loaded.secret)
   } catch (error) {
-    const message = errorMessage(error)
-    write(`3. Agent key: ${message === 'bad_key' ? 'bad length.' : message}`)
+    write(`3. Agent key: ${signFailure(error)}`)
     return 1
   }
   const verb = loaded.created ? 'created' : 'loaded'
   write(`3. Agent key: ${verb}. Public key: ${Buffer.from(signed.publicKey).toString('base64')}`)
-  write(`4. Agent request signed. issuedAt: ${issuedAt}`)
+  write(`4. Agent request signed. issuedAt: ${signed.issuedAt}`)
 
-  const body = JSON.stringify({
-    audience,
-    publicKey: Buffer.from(signed.publicKey).toString('base64url'),
-    issuedAt,
-    signature: Buffer.from(signed.signature).toString('base64url'),
-  })
-  let response: Response
-  try {
-    response = await fetch(`${origin}/agent-proof`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
-    })
-  } catch (error) {
-    write(`5. POST ${origin}/agent-proof. ${errorMessage(error)}`)
+  const first = await postAgentProof(`${origin}/agent-proof`, signed.body)
+  if (first.kind === 'network') {
+    write(`5. POST ${origin}/agent-proof. ${first.detail}`)
     return 1
   }
   write(`5. POST ${origin}/agent-proof`)
+  if (first.kind === 'proof') {
+    write(`6. HTTP 200. Proof bytes: ${first.proof.byteLength}`)
+    return finishProof(first.proof, origin, audience, publicKeyFile, 7, write)
+  }
+  if (first.kind === 'fail') {
+    write(`6. HTTP ${first.status}. ${first.detail}`)
+    return 1
+  }
+  write(`6. HTTP 403. Authorization required. Skill: ${first.skill}`)
+  return proveAfterAllow(origin, audience, loaded.secret, signed.body, label, publicKeyFile, write)
+}
 
+async function proveAfterAllow(
+  origin: string,
+  audience: string,
+  secret: Uint8Array,
+  first: AgentProofBody,
+  label: string,
+  publicKeyFile: string,
+  write: Write,
+): Promise<number> {
+  const listener = await listenForAllow()
+  if (!listener.ok) {
+    write(`7. Listening on 127.0.0.1. ${listener.reason}`)
+    return 1
+  }
+  write(`7. Listening on ${listener.origin}`)
+
+  let ticketResponse: Response
+  try {
+    ticketResponse = await fetch(`${origin}/agents/ticket`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...first, label, loopback: listener.origin }),
+    })
+  } catch (error) {
+    listener.close()
+    write(`8. POST ${origin}/agents/ticket. ${errorMessage(error)}`)
+    return 1
+  }
+  let ticketText: string
+  try {
+    ticketText = await ticketResponse.text()
+  } catch (error) {
+    listener.close()
+    write(`8. POST ${origin}/agents/ticket. ${errorMessage(error)}`)
+    return 1
+  }
+  if (ticketResponse.status !== 200) {
+    listener.close()
+    write(`8. POST ${origin}/agents/ticket. HTTP ${ticketResponse.status}. ${ticketText.slice(0, 200)}`)
+    return 1
+  }
+  const approveUrl = approveUrlFrom(ticketText)
+  if (approveUrl === null) {
+    listener.close()
+    write(`8. POST ${origin}/agents/ticket. HTTP 200. bad ticket`)
+    return 1
+  }
+  write(`8. POST ${origin}/agents/ticket`)
+  write(`9. Open ${approveUrl}`)
+  await listener.allowed
+  write('10. Allowed')
+
+  let signed: SignedAgentFields
+  try {
+    signed = signAgentFields(audience, secret)
+  } catch (error) {
+    write(`11. Agent request signed. ${signFailure(error)}`)
+    return 1
+  }
+  write(`11. Agent request signed. issuedAt: ${signed.issuedAt}`)
+  const second = await postAgentProof(`${origin}/agent-proof`, signed.body)
+  if (second.kind === 'network') {
+    write(`12. POST ${origin}/agent-proof. ${second.detail}`)
+    return 1
+  }
+  write(`12. POST ${origin}/agent-proof`)
+  if (second.kind !== 'proof') {
+    const status = second.kind === 'unauthorized' ? 403 : second.status
+    const detail = second.kind === 'unauthorized' ? 'unauthorized' : second.detail
+    write(`13. HTTP ${status}. ${detail}`)
+    return 1
+  }
+  write(`13. HTTP 200. Proof bytes: ${second.proof.byteLength}`)
+  return finishProof(second.proof, origin, audience, publicKeyFile, 14, write)
+}
+
+function signAgentFields(audience: string, secret: Uint8Array): SignedAgentFields {
+  const issuedAt = Math.floor(Date.now() / 1000)
+  const signed = signAgentRequest(audience, secret, issuedAt)
+  return {
+    issuedAt,
+    publicKey: signed.publicKey,
+    body: {
+      audience,
+      publicKey: Buffer.from(signed.publicKey).toString('base64url'),
+      issuedAt,
+      signature: Buffer.from(signed.signature).toString('base64url'),
+    },
+  }
+}
+
+function signFailure(error: unknown): string {
+  const message = errorMessage(error)
+  return message === 'bad_key' ? 'bad length.' : message
+}
+
+async function postAgentProof(url: string, body: AgentProofBody): Promise<ProofPost> {
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (error) {
+    return { kind: 'network', detail: errorMessage(error) }
+  }
+  return readProofHttp(response)
+}
+
+async function readProofHttp(response: Response): Promise<Exclude<ProofPost, { kind: 'network' }>> {
   let text: string
   try {
     text = await response.text()
   } catch (error) {
-    write(`6. HTTP ${response.status}. ${errorMessage(error)}`)
-    return 1
+    return { kind: 'fail', status: response.status, detail: errorMessage(error) }
   }
-  if (response.status !== 200) {
-    write(`6. HTTP ${response.status}. ${text.slice(0, 200)}`)
-    return 1
+  if (response.status === 403) {
+    const skill = unauthorizedSkill(text)
+    if (skill !== null) return { kind: 'unauthorized', skill }
   }
+  if (response.status !== 200) return { kind: 'fail', status: response.status, detail: text.slice(0, 200) }
   const proof = decodeProofBody(text)
-  if (proof === null) {
-    write('6. HTTP 200. bad proof')
-    return 1
+  if (proof === null) return { kind: 'fail', status: 200, detail: 'bad proof' }
+  return { kind: 'proof', proof }
+}
+
+function unauthorizedSkill(text: string): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
   }
-  write(`6. HTTP 200. Proof bytes: ${proof.byteLength}`)
-  return finishProof(proof, origin, audience, publicKeyFile, 7, write)
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const error = 'error' in parsed ? parsed.error : undefined
+  const skill = 'skill' in parsed ? parsed.skill : undefined
+  if (error !== 'unauthorized' || typeof skill !== 'string') return null
+  if (skill.length === 0 || skill.length > 2048 || /[\r\n\0]/.test(skill)) return null
+  return skill
+}
+
+function approveUrlFrom(text: string): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const ticket = 'ticket' in parsed ? parsed.ticket : undefined
+  const approveUrl = 'approveUrl' in parsed ? parsed.approveUrl : undefined
+  if (typeof ticket !== 'string' || ticket.length === 0 || ticket.length > 2048) return null
+  if (typeof approveUrl !== 'string' || approveUrl.length === 0 || approveUrl.length > 2048) return null
+  if (/[\r\n\0]/.test(ticket) || /[\r\n\0]/.test(approveUrl)) return null
+  try {
+    const url = new URL(approveUrl)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  } catch {
+    return null
+  }
+  return approveUrl
 }
 
 async function runBrowser(
@@ -225,10 +419,7 @@ function listenForReturn(
     })
     server.listen(Number(url.port), url.hostname, () => {
       listening = true
-      // A test that returns before POST must not hold the worker. An operator
-      // run has no other handle, so the listen socket has to stay referenced.
-      server.unref()
-      if (process.env.VITEST !== 'true') server.ref()
+      holdOperatorSocket(server)
       const params = new URLSearchParams()
       params.set('audience', audience)
       params.set('return', `${audience}/`)
@@ -238,12 +429,90 @@ function listenForReturn(
   })
 }
 
-function sendPage(res: ServerResponse): void {
+function listenForAllow(): Promise<AllowListener> {
+  return new Promise((resolve) => {
+    let listening = false
+    let closed = false
+    let finished = false
+    let finishAllowed: () => void = () => {}
+    const allowed = new Promise<void>((resolveAllowed) => {
+      finishAllowed = () => {
+        if (finished) return
+        finished = true
+        resolveAllowed()
+      }
+    })
+    const shutdown = () => {
+      if (closed) return
+      closed = true
+      server.close()
+    }
+    const server = createServer((req, res) => {
+      if (req.method === 'GET') {
+        sendPage(res, ALLOW_PAGE)
+        return
+      }
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'GET, POST' })
+        res.end()
+        return
+      }
+      void readLimited(req, 8192)
+        .then((body) => {
+          if (body !== '#signet-agent=allowed') {
+            res.writeHead(204, { connection: 'close' })
+            res.end()
+            return
+          }
+          res.writeHead(204, { connection: 'close' })
+          res.end(() => {
+            shutdown()
+            finishAllowed()
+          })
+        })
+        .catch(() => {
+          if (res.headersSent) return
+          res.writeHead(400, { connection: 'close' })
+          res.end()
+        })
+    })
+    server.on('error', (error) => {
+      if (listening) return
+      server.close()
+      resolve({ ok: false, reason: errorMessage(error) })
+    })
+    server.listen(0, '127.0.0.1', () => {
+      listening = true
+      const address = server.address()
+      if (address === null || typeof address === 'string') {
+        server.close()
+        resolve({ ok: false, reason: 'bad address' })
+        return
+      }
+      holdOperatorSocket(server)
+      resolve({
+        ok: true,
+        origin: `http://127.0.0.1:${address.port}`,
+        allowed,
+        close: shutdown,
+      })
+    })
+  })
+}
+
+function holdOperatorSocket(server: Server): void {
+  // A test that returns before POST must not hold the worker. An operator
+  // run has no other handle, so the listen socket has to stay referenced.
+  server.unref()
+  if (process.env.VITEST !== 'true') server.ref()
+}
+
+function sendPage(res: ServerResponse, page = PAGE): void {
   res.writeHead(200, {
     'content-type': 'text/html; charset=utf-8',
     connection: 'close',
   })
-  res.end(PAGE)
+  res.end(page)
 }
 
 function proofFromFragment(body: string): Heard {
