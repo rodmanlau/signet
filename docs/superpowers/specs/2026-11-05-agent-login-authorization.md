@@ -74,7 +74,7 @@ Proofs last 15 minutes. Sites verify offline with `@agenticage/proof`. Signet is
 Ship the ceremony above on top of a deep-link Allow flow.
 
 - Put the grant check in `decideAgentProof` after a good signature.
-- Store grants in a sibling JSON file on the same volume as sessions.
+- Store grants in a sibling JSON file on the same volume as sessions for the first ship. Next durable store is Postgres for sessions and grants together. Skip SQLite.
 - Keep the agent's own derived identity in the proof.
 - Do not change the published proof bytes.
 - Teach Cursor agents with a skill linked from the unauthorized response.
@@ -85,7 +85,7 @@ Ship the ceremony above on top of a deep-link Allow flow.
 
 ### Storage
 
-A second file beside the session file:
+**Now (ship the ceremony).** A second JSON file beside the session file:
 
 - Fly: `/data/agent-grants.json`
 - Local setup: `.signet/agent-grants.json`
@@ -101,6 +101,42 @@ Each grant stores:
 - `createdAt`
 
 One public key has one owner. The same owner approving again updates the label. A missing file means no grants. Use the same temp-file rewrite and mode `0600` as sessions. A corrupt grants file must not throw out of `startLogin`. Log it, refuse every agent proof, and keep human login up.
+
+Keep grant reads and writes behind a small store interface (`load` / `isGranted` / `upsert` / `revoke` / `listForOwner`) so the next storage change does not rewrite `decideAgentProof` or the Allow pages.
+
+### Storage roadmap
+
+Signet today has no Redis, Postgres, or SQLite. Durable state is JSON on one Fly volume. That is enough to prove Allow and Revoke. It will not survive a second Signet machine or serious multi-user load.
+
+**Skip a SQLite intermediary. Next durable store is Postgres (or the same class of SQL database).**
+
+| Step | Store | When | What moves |
+| --- | --- | --- | --- |
+| 0 (now) | JSON files on the volume | First Allow/Revoke ship | Sessions + grants as today / sibling file |
+| 1 | Postgres | Before a second machine, or as soon as grants must outlive one volume | Sessions and grants together |
+| 2 (optional) | Redis | After multiple Signet processes share tickets | Pending Allow tickets only (TTL ~10 minutes) |
+| 3 (optional) | Redis cache in front of Postgres | Only if `isGranted` QPS needs it | Read-through cache; Postgres stays source of truth |
+
+**Why not SQLite first.**
+
+- Production-ready ASAP means one cutover, not JSON → SQLite → Postgres.
+- SQLite on the same Fly volume still fails for two writers / two machines, which is the main limit of the JSON files.
+- The testing impetus is weak. Unit tests can keep an in-memory or JSON store behind the same interface. Integration tests can run Postgres in CI (Fly Postgres locally, Docker, or a managed test instance). You do not need SQLite to get fast tests.
+- SQLite is worth considering only if you refuse to run any database process for a long time and will stay on one machine. That is a delay of the production shape, not a step toward it.
+
+**Why Postgres next.**
+
+- Grants and browser sessions are account data. Losing them forces every person to sign in or Allow again. That belongs in a durable primary, not Redis alone.
+- List-by-owner and revoke are ordinary SQL. The dashboard wants that.
+- Fly already fits a Postgres sidecar or managed Postgres. The app gains `DATABASE_URL` and a migration for `sessions` and `agent_grants` tables.
+- Tickets can stay in process memory until there is more than one Signet process. Then put tickets in Redis. Do not put grants only in Redis.
+
+**Cutover sketch for step 1.**
+
+1. Add the store interface if Unit 1 has not already.
+2. Add Postgres schema for sessions and grants (unique on agent public key; index on owner provider + subject).
+3. Dual-read optional only if you need zero downtime with existing volume data. For early Signet, a maintenance window that imports JSON into Postgres and flips `SIGNET_SESSIONS` / grant loading to the database is enough.
+4. Keep Redis out of this cutover.
 
 ### Possession ticket
 
@@ -217,6 +253,8 @@ Do not build this. Treat "returns a key" in product talk as "returns authorizati
 - An agent nonce cache. After the gate, a replay inside 60 seconds still needs the grant.
 - A separate dashboard hostname. Ship `GET /agents` on the issuer first.
 - Signet-minted agent secrets returned through the browser.
+- SQLite as a stepping stone to Postgres.
+- Redis as the primary grant or session store.
 
 ## Implementation map
 
