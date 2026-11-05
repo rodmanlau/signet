@@ -64,7 +64,11 @@ A proof the site already holds stays valid until it expires. Signet does not tel
 
 ## Ask from an agent
 
-The agent holds its own key and sends `POST /agent-proof`, signed with that key. Signet stores nothing about the agent. `signAgentRequest` builds the request. `agentRequestOk` checks one.
+The agent holds its own key and sends `POST /agent-proof`, signed with that key. `signAgentRequest` builds the request. `agentRequestOk` checks one.
+
+A key that is not on the person's grant list receives `403` with JSON `{ "error": "unauthorized", "skill": "<issuer>/agents/skill" }`. The skill text explains the next step. The agent then posts `POST /agents/ticket` with the same signed fields, a `label`, and an optional loopback origin (`http://127.0.0.1:<port>` or `http://localhost:<port>` only). The response includes an `approveUrl`. A signed-in person opens that URL and clicks Allow. That grants the agent's existing public key. Signet does not mint a new secret.
+
+After Allow, a loopback ticket redirects to `{loopback}/#signet-agent=allowed`. Without loopback, the agent polls `POST /agent-proof` until it is `200`. Revoke is `GET /agents` while signed in, or an agent-led revoke URL for the same key. Revoke stops the next mint. A proof a site already holds stays valid until it expires.
 
 `signProof` is how the Signet process signs. Callers do not sign proofs.
 
