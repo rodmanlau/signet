@@ -6,6 +6,7 @@ import { keygenAsync as generateKeyPair } from '@noble/ed25519'
 import { signProof, verifyProof } from '@agenticage/proof'
 import { expect, it } from 'vitest'
 import { agentSubject, deriveIdentity } from '../../server/src/identity.js'
+import { grantsFilePath, upsertGrant, writeGrants, type GrantStore } from '../../server/src/grants.js'
 import { startLogin } from '../../server/src/main.js'
 import { runSignetClient } from '../src/run.js'
 
@@ -49,12 +50,15 @@ it('prints every command when the mode is missing or repeated', async () => {
 
 it('prints nine agent steps and hides the secret and the proof', async () => {
   const { secretKey, publicKey } = await generateKeyPair()
+  const agent = await generateKeyPair()
   const port = await freePort()
   const origin = `http://127.0.0.1:${port}`
   const dir = await mkdtemp(join(tmpdir(), 'signet-client-'))
   const sessions = join(dir, 'sessions.json')
   const agentKey = join(dir, 'agent.key')
   const publicKeys = join(dir, 'keys.json')
+  await writeFile(agentKey, agent.secretKey)
+  await grantAgent(sessions, agent.publicKey)
   await writeFile(
     publicKeys,
     JSON.stringify([{ id: 'k1', publicKey: Buffer.from(publicKey).toString('base64') }]),
@@ -81,7 +85,7 @@ it('prints nine agent steps and hides the secret and the proof', async () => {
     expect(lines).toHaveLength(9)
     expect(lines[0]).toBe(`1. Signet origin: ${origin}`)
     expect(lines[1]).toBe('2. Audience: http://127.0.0.1:8080')
-    expect(lines[2]?.startsWith('3. Agent key: created. Public key: ')).toBe(true)
+    expect(lines[2]?.startsWith('3. Agent key: loaded. Public key: ')).toBe(true)
     expect(lines[3]).toMatch(/^4\. Agent request signed\. issuedAt: \d+$/)
     expect(lines[4]).toBe(`5. POST ${origin}/agent-proof`)
     expect(lines[5]).toMatch(/^6\. HTTP 200\. Proof bytes: \d+$/)
@@ -170,6 +174,9 @@ it('resolves file arguments from the directory where npm was started', async () 
   const elsewhere = await mkdtemp(join(tmpdir(), 'signet-client-cwd-'))
   const keysDir = join(invoked, '.signet')
   await mkdir(keysDir)
+  const agent = await generateKeyPair()
+  await writeFile(join(keysDir, 'agent.key'), agent.secretKey)
+  await grantAgent(join(invoked, 'sessions.json'), agent.publicKey)
   await writeFile(
     join(keysDir, 'keys.json'),
     JSON.stringify([{ id: 'k1', publicKey: Buffer.from(publicKey).toString('base64') }]),
@@ -197,7 +204,7 @@ it('resolves file arguments from the directory where npm was started', async () 
       (line) => lines.push(line),
     )
     expect(code).toBe(0)
-    expect(lines[2]?.startsWith('3. Agent key: created. Public key: ')).toBe(true)
+    expect(lines[2]?.startsWith('3. Agent key: loaded. Public key: ')).toBe(true)
     expect(lines[8]?.startsWith('9. Identity: ')).toBe(true)
     const secret = await readFile(join(keysDir, 'agent.key'))
     expect(secret).toHaveLength(32)
@@ -399,6 +406,21 @@ it('prints the switch URL and checks the proof the way human sign-in does', asyn
 })
 
 function publicFromLog(line: string): Uint8Array {
-  const encoded = line.slice('3. Agent key: created. Public key: '.length)
+  const marker = 'Public key: '
+  const at = line.lastIndexOf(marker)
+  const encoded = at < 0 ? '' : line.slice(at + marker.length)
   return new Uint8Array(Buffer.from(encoded, 'base64'))
+}
+
+async function grantAgent(sessionsFile: string, publicKey: Uint8Array): Promise<void> {
+  const store: GrantStore = new Map()
+  const saved = upsertGrant(store, {
+    ownerProvider: 'google',
+    ownerSubject: 'owner-1',
+    publicKey,
+    label: 'Cursor',
+    createdAt: 1_700_000_000,
+  })
+  expect(saved).toBe(true)
+  await writeGrants(grantsFilePath(sessionsFile), store)
 }

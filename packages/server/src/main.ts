@@ -7,6 +7,7 @@ import { getPublicKey } from '@noble/ed25519'
 import '@agenticage/proof'
 import type { ProviderName } from './identity.js'
 import { connectingText, decideAgentProof, decideConnect, destinationName, type LoginSession } from './connect.js'
+import { grantsFilePath, isGranted, loadGrants, type GrantStore } from './grants.js'
 
 export type Exchange = (code: string) => Promise<{ subject: string; label: string }>
 
@@ -82,6 +83,8 @@ type Ctx = {
   testLogin: boolean
   sessionsFile: string
   sessions: Map<string, LoginSession>
+  grantsFile: string
+  grants: GrantStore
   writing: Promise<void>
   usedNonces: Map<string, true>
 }
@@ -101,6 +104,8 @@ export async function startLogin(
   const sessionsFile = (options.sessionsFile ?? process.env.SIGNET_SESSIONS ?? '').trim()
   if (sessionsFile === '') throw new Error('SIGNET_SESSIONS is required')
   const sessions = await loadSessions(sessionsFile)
+  const grantsFile = grantsFilePath(sessionsFile)
+  const grants = await loadGrants(grantsFile)
   // Sync getPublicKey needs SHA-512. Importing @agenticage/proof wires it.
   const derived = getPublicKey(options.privateKey)
   if (options.publicKey && !sameBytes(options.publicKey, derived)) {
@@ -117,6 +122,8 @@ export async function startLogin(
     testLogin: options.testLogin ?? process.env.SIGNET_TEST === '1',
     sessionsFile,
     sessions,
+    grantsFile,
+    grants,
     writing: Promise.resolve(),
     usedNonces: new Map(),
   }
@@ -371,8 +378,13 @@ async function handleAgentProof(req: IncomingMessage, res: ServerResponse, ctx: 
     keyId: ctx.keyId,
     privateKey: ctx.privateKey,
     derivationKey: ctx.derivationKey,
+    granted: isGranted(ctx.grants, body.publicKey),
   })
   if (decision.type === 'reject') return sendText(res, 400, 'rejected')
+  if (decision.type === 'unauthorized') {
+    const payload = JSON.stringify({ error: 'unauthorized', skill: `${ctx.issuer}/agents/skill` })
+    return sendText(res, 403, payload, { 'content-type': 'application/json; charset=utf-8' })
+  }
   const proof = Buffer.from(decision.proof).toString('base64url')
   sendText(res, 200, JSON.stringify({ proof }), { 'content-type': 'application/json; charset=utf-8' })
 }

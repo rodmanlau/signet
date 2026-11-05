@@ -86,7 +86,8 @@ export function decideAgentProof(input: {
   keyId: string
   privateKey: Uint8Array
   derivationKey: Uint8Array
-}): { type: 'reject' } | { type: 'proof'; proof: Uint8Array } {
+  granted: boolean
+}): { type: 'reject' } | { type: 'unauthorized' } | { type: 'proof'; proof: Uint8Array } {
   if (!agentRequestOk(input.audience, input.publicKey, input.issuedAt, input.signature, input.now)) {
     return { type: 'reject' }
   }
@@ -99,6 +100,7 @@ export function decideAgentProof(input: {
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== input.audience) {
     return { type: 'reject' }
   }
+  if (!input.granted) return { type: 'unauthorized' }
   let identity: string
   try {
     identity = deriveIdentity('agent', agentSubject(input.publicKey), url.hostname, input.derivationKey)

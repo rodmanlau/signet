@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } from '@agenticage/proof'
 import { agentSubject, deriveIdentity } from '../src/identity.js'
 import { connectingText, decideAgentProof, decideConnect, destinationName } from '../src/connect.js'
+import { grantsFilePath, upsertGrant, writeGrants, type GrantStore } from '../src/grants.js'
 import { startLogin } from '../src/main.js'
 
 function acceptedIdentity(
@@ -1297,6 +1298,7 @@ describe('decideAgentProof', () => {
       publicKey: signed.publicKey,
       issuedAt: now - 30,
       signature: signed.signature,
+      granted: true,
     })
     expect(ok.type).toBe('proof')
     if (ok.type !== 'proof') return
@@ -1312,6 +1314,7 @@ describe('decideAgentProof', () => {
         publicKey: signed.publicKey,
         issuedAt: now - 30,
         signature: signed.signature,
+        granted: true,
       }).type,
     ).toBe('reject')
     const stale = signAgentRequest(audience, agent.secretKey, now - 61)
@@ -1322,12 +1325,19 @@ describe('decideAgentProof', () => {
         publicKey: stale.publicKey,
         issuedAt: now - 61,
         signature: stale.signature,
+        granted: true,
       }).type,
     ).toBe('reject')
     const edge = signAgentRequest(audience, agent.secretKey, now - 60)
     expect(
-      decideAgentProof({ ...keys, audience, publicKey: edge.publicKey, issuedAt: now - 60, signature: edge.signature })
-        .type,
+      decideAgentProof({
+        ...keys,
+        audience,
+        publicKey: edge.publicKey,
+        issuedAt: now - 60,
+        signature: edge.signature,
+        granted: true,
+      }).type,
     ).toBe('proof')
     const pathed = signAgentRequest('http://127.0.0.1:8080/session', agent.secretKey, now)
     expect(
@@ -1337,8 +1347,32 @@ describe('decideAgentProof', () => {
         publicKey: pathed.publicKey,
         issuedAt: now,
         signature: pathed.signature,
+        granted: false,
       }).type,
     ).toBe('reject')
+  })
+
+  it('returns unauthorized only after the signature and audience checks pass', async () => {
+    const { secretKey } = await generateKeyPair()
+    const agent = await generateKeyPair()
+    const now = 1_700_000_000
+    const audience = 'http://127.0.0.1:8080'
+    const signed = signAgentRequest(audience, agent.secretKey, now)
+    const keys = {
+      now,
+      issuer: 'https://login.example',
+      keyId: 'k1',
+      privateKey: secretKey,
+      derivationKey: new TextEncoder().encode('test-key'),
+      audience,
+      publicKey: signed.publicKey,
+      issuedAt: now,
+    }
+    expect(decideAgentProof({ ...keys, signature: signed.signature, granted: false }).type).toBe('unauthorized')
+    const bad = Uint8Array.from(signed.signature)
+    bad[0] ^= 0xff
+    expect(decideAgentProof({ ...keys, signature: bad, granted: false }).type).toBe('reject')
+    expect(decideAgentProof({ ...keys, signature: bad, granted: true }).type).toBe('reject')
   })
 
   it('does not create a session file', async () => {
@@ -1346,6 +1380,7 @@ describe('decideAgentProof', () => {
     const agent = await generateKeyPair()
     const sessions = await tempSessions()
     const now = 1_700_000_000
+    await writeAgentGrant(sessions.file, agent.publicKey)
     const server = await startLogin({
       port: 0,
       issuer: 'https://login.example',
@@ -1386,7 +1421,174 @@ describe('decideAgentProof', () => {
       await sessions.remove()
     }
   })
+
+  it('returns 403 and the skill URL when the signature is valid and the key is not granted', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const agent = await generateKeyPair()
+    const other = await generateKeyPair()
+    const sessions = await tempSessions()
+    const now = 1_700_000_000
+    await writeAgentGrant(sessions.file, other.publicKey)
+    const server = await startLogin(loginFor(sessions.file, secretKey, publicKey, now))
+    try {
+      const res = await postAgentProof(server.url, agent.secretKey, now)
+      expect(res.status).toBe(403)
+      expect(res.headers.get('content-type')).toContain('application/json')
+      expect(await res.json()).toEqual({ error: 'unauthorized', skill: 'https://login.example/agents/skill' })
+      await expect(readFile(sessions.file, 'utf8')).rejects.toThrow()
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
+
+  it('returns 400 when the signature is bad', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const agent = await generateKeyPair()
+    const stranger = await generateKeyPair()
+    const sessions = await tempSessions()
+    const now = 1_700_000_000
+    await writeAgentGrant(sessions.file, agent.publicKey)
+    const server = await startLogin(loginFor(sessions.file, secretKey, publicKey, now))
+    try {
+      const granted = await postAgentProof(server.url, agent.secretKey, now, (signature) => {
+        signature[0] ^= 0xff
+      })
+      expect(granted.status).toBe(400)
+      expect(await granted.text()).toBe('rejected')
+      expect(granted.headers.get('content-type')).toContain('text/plain')
+      const ungranted = await postAgentProof(server.url, stranger.secretKey, now, (signature) => {
+        signature[0] ^= 0xff
+      })
+      expect(ungranted.status).toBe(400)
+      expect(await ungranted.text()).toBe('rejected')
+    } finally {
+      await server.close()
+      await sessions.remove()
+    }
+  })
+
+  it('keeps serving when agent-grants.json is corrupt and refuses proofs until the file is fixed', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const agent = await generateKeyPair()
+    const sessions = await tempSessions()
+    const grantsFile = grantsFilePath(sessions.file)
+    await writeFile(grantsFile, '{', 'utf8')
+    const now = 1_700_000_000
+    const stderr = captureStderr()
+    let server: { url: string; close(): Promise<void> } | undefined
+    try {
+      server = await startLogin(loginFor(sessions.file, secretKey, publicKey, now))
+      expect(stderr.text()).toContain(`invalid agent grants file ${grantsFile}; agent proofs stay unauthorized`)
+      const denied = await postAgentProof(server.url, agent.secretKey, now)
+      expect(denied.status).toBe(403)
+      expect(await denied.json()).toEqual({ error: 'unauthorized', skill: 'https://login.example/agents/skill' })
+      await server.close()
+      server = undefined
+      const warned = stderr.text()
+      await writeAgentGrant(sessions.file, agent.publicKey)
+      server = await startLogin(loginFor(sessions.file, secretKey, publicKey, now))
+      expect(stderr.text()).toBe(warned)
+      const ok = await postAgentProof(server.url, agent.secretKey, now)
+      expect(ok.status).toBe(200)
+      const parsed = (await ok.json()) as { proof: string }
+      const proof = Buffer.from(parsed.proof, 'base64url')
+      expect(acceptedIdentity(proof, publicKey, now, 'https://login.example', 'http://127.0.0.1:8080')).toBe(
+        deriveIdentity('agent', agentSubject(agent.publicKey), '127.0.0.1', new TextEncoder().encode('test-key')),
+      )
+    } finally {
+      stderr.restore()
+      await server?.close()
+      await sessions.remove()
+    }
+  })
+
+  it('returns 403 when agent-grants.json is missing', async () => {
+    const { secretKey, publicKey } = await generateKeyPair()
+    const agent = await generateKeyPair()
+    const sessions = await tempSessions()
+    const now = 1_700_000_000
+    const stderr = captureStderr()
+    const server = await startLogin(loginFor(sessions.file, secretKey, publicKey, now))
+    try {
+      expect(stderr.text()).not.toContain('invalid agent grants file')
+      const res = await postAgentProof(server.url, agent.secretKey, now)
+      expect(res.status).toBe(403)
+      expect(await res.json()).toEqual({ error: 'unauthorized', skill: 'https://login.example/agents/skill' })
+      await expect(readFile(grantsFilePath(sessions.file), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(readFile(sessions.file, 'utf8')).rejects.toThrow()
+    } finally {
+      stderr.restore()
+      await server.close()
+      await sessions.remove()
+    }
+  })
 })
+
+function loginFor(sessionsFile: string, secretKey: Uint8Array, publicKey: Uint8Array, now: number) {
+  return {
+    port: 0,
+    issuer: 'https://login.example',
+    keyId: 'k1',
+    privateKey: secretKey,
+    publicKey,
+    derivationKey: new TextEncoder().encode('test-key'),
+    now: () => now,
+    testLogin: false,
+    sessionsFile,
+  }
+}
+
+async function writeAgentGrant(sessionsFile: string, publicKey: Uint8Array): Promise<void> {
+  const store: GrantStore = new Map()
+  expect(
+    upsertGrant(store, {
+      ownerProvider: 'google',
+      ownerSubject: 'owner-1',
+      publicKey,
+      label: 'Cursor',
+      createdAt: 1_700_000_000,
+    }),
+  ).toBe(true)
+  await writeGrants(grantsFilePath(sessionsFile), store)
+}
+
+async function postAgentProof(
+  origin: string,
+  secretKey: Uint8Array,
+  issuedAt: number,
+  mutate?: (signature: Uint8Array) => void,
+): Promise<Response> {
+  const audience = 'http://127.0.0.1:8080'
+  const signed = signAgentRequest(audience, secretKey, issuedAt)
+  const signature = Uint8Array.from(signed.signature)
+  mutate?.(signature)
+  return fetch(new URL('/agent-proof', origin), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      audience,
+      publicKey: Buffer.from(signed.publicKey).toString('base64url'),
+      issuedAt,
+      signature: Buffer.from(signature).toString('base64url'),
+    }),
+  })
+}
+
+function captureStderr(): { text(): string; restore(): void } {
+  const chunks: string[] = []
+  const write = process.stderr.write
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
+    return true
+  }) as typeof process.stderr.write
+  return {
+    text: () => chunks.join(''),
+    restore() {
+      process.stderr.write = write
+    },
+  }
+}
 
 async function tempSessions(): Promise<{ file: string; remove(): Promise<void> }> {
   const dir = await mkdtemp(join(tmpdir(), 'valar-login-'))
