@@ -102,6 +102,14 @@ export function upsertGrant(store: GrantStore, grant: AgentGrant): boolean {
   return true
 }
 
+export function listForOwner(store: GrantStore, ownerProvider: ProviderName, ownerSubject: string): AgentGrant[] {
+  const rows: AgentGrant[] = []
+  for (const grant of store.values()) {
+    if (grant.ownerProvider === ownerProvider && grant.ownerSubject === ownerSubject) rows.push(grant)
+  }
+  return rows
+}
+
 export function revokeGrant(
   store: GrantStore,
   ownerProvider: ProviderName,

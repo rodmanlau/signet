@@ -91,19 +91,12 @@ export function decideAgentProof(input: {
   if (!agentRequestOk(input.audience, input.publicKey, input.issuedAt, input.signature, input.now)) {
     return { type: 'reject' }
   }
-  let url: URL
-  try {
-    url = new URL(input.audience)
-  } catch {
-    return { type: 'reject' }
-  }
-  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== input.audience) {
-    return { type: 'reject' }
-  }
+  const audience = agentAudience(input.audience)
+  if (!audience) return { type: 'reject' }
   if (!input.granted) return { type: 'unauthorized' }
   let identity: string
   try {
-    identity = deriveIdentity('agent', agentSubject(input.publicKey), url.hostname, input.derivationKey)
+    identity = deriveIdentity('agent', agentSubject(input.publicKey), audience.hostname, input.derivationKey)
   } catch (error) {
     if (error instanceof Error && (error.message === 'bad_host' || error.message === 'empty_subject')) {
       return { type: 'reject' }
@@ -122,4 +115,19 @@ export function decideAgentProof(input: {
     input.privateKey,
   )
   return { type: 'proof', proof }
+}
+
+export function agentAudienceOk(audience: string): boolean {
+  return agentAudience(audience) !== null
+}
+
+function agentAudience(audience: string): URL | null {
+  let url: URL
+  try {
+    url = new URL(audience)
+  } catch {
+    return null
+  }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== audience) return null
+  return url
 }
