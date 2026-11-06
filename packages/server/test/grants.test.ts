@@ -12,7 +12,7 @@ import {
   upsertGrant,
   writeGrants,
   type AgentGrant,
-  type GrantStore,
+  type GrantMap,
 } from '../src/grants.js'
 
 describe('agent grants', () => {
@@ -89,7 +89,7 @@ describe('agent grants', () => {
     const { publicKey } = await generateKeyPair()
     const grant = sample(publicKey, 'Cursor')
     try {
-      const store: GrantStore = new Map()
+      const store: GrantMap = new Map()
       expect(upsertGrant(store, grant)).toBe(true)
       await writeGrants(file, store)
       expect((await stat(file)).mode & 0o777).toBe(0o600)
@@ -115,7 +115,7 @@ describe('agent grants', () => {
 
   it('updates the label for the same owner and refuses a different owner', async () => {
     const { publicKey } = await generateKeyPair()
-    const store: GrantStore = new Map()
+    const store: GrantMap = new Map()
     const original = Uint8Array.from(publicKey)
     expect(upsertGrant(store, sample(original, 'Cursor'))).toBe(true)
     original[0] ^= 0xff
@@ -138,7 +138,7 @@ describe('agent grants', () => {
 
   it('revokes only the owner of that public key', async () => {
     const { publicKey } = await generateKeyPair()
-    const store: GrantStore = new Map()
+    const store: GrantMap = new Map()
     expect(upsertGrant(store, sample(publicKey, 'Cursor'))).toBe(true)
     expect(revokeGrant(store, 'apple', 'owner-1', publicKey)).toBe(false)
     expect(revokeGrant(store, 'google', 'other', publicKey)).toBe(false)
@@ -150,7 +150,7 @@ describe('agent grants', () => {
 
   it('refuses a grant with a newline in the label', async () => {
     const { publicKey } = await generateKeyPair()
-    const store: GrantStore = new Map()
+    const store: GrantMap = new Map()
     expect(upsertGrant(store, sample(publicKey, 'bad\nlabel'))).toBe(false)
     expect(store.size).toBe(0)
   })

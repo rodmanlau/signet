@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { readProofAudience, readProofExpiry, signAgentRequest, verifyProof } from '@agenticage/proof'
 import { agentSubject, deriveIdentity } from '../src/identity.js'
 import { connectingText, decideAgentProof, decideConnect, destinationName } from '../src/connect.js'
-import { grantsFilePath, upsertGrant, writeGrants, type GrantStore } from '../src/grants.js'
+import { grantsFilePath, upsertGrant, writeGrants, type GrantMap } from '../src/grants.js'
 import { startLogin } from '../src/main.js'
 
 function acceptedIdentity(
@@ -1540,7 +1540,7 @@ function loginFor(sessionsFile: string, secretKey: Uint8Array, publicKey: Uint8A
 }
 
 async function writeAgentGrant(sessionsFile: string, publicKey: Uint8Array): Promise<void> {
-  const store: GrantStore = new Map()
+  const store: GrantMap = new Map()
   expect(
     upsertGrant(store, {
       ownerProvider: 'google',
