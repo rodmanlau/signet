@@ -490,6 +490,7 @@ function loginOptions(
     testLogin: true,
     providers: {},
     sessionsFile,
+    databaseUrl: '',
     ...extra,
   }
 }

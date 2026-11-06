@@ -73,7 +73,7 @@ The sign-in page prints a code when it cannot offer an account.
 
 Fly.io runs one machine from `Dockerfile` and `fly.toml`. The app name is `signet`, the region is `iad`, and the issuer is `https://signet.fly.dev`. The process listens on `0.0.0.0:8787`. Sessions are `/data/sessions.json` on that machine's volume. The machine stays up when idle. A deploy restarts that one machine. It does not add a second.
 
-The process reads the session file when it starts and rewrites the file when a session changes. A second machine would not see those sessions.
+With `DATABASE_URL` unset, the process reads the session file when it starts and rewrites the file when a session changes. A second machine would not see those sessions. With `DATABASE_URL` set, the process stores sessions and grants in Postgres and applies its schema migration at startup.
 
 The image starts `@agenticage/server` directly and does not read `login.env`. Set `SIGNET_PRIVATE_KEY` and `SIGNET_DERIVATION_KEY` as Fly secrets, using the values in `.signet/login.env`. Leave `SIGNET_HOST`, `SIGNET_PORT`, `SIGNET_SESSIONS`, `SIGNET_KEY_ID`, `SIGNET_ISSUER`, and `SIGNET_TEST` out of the secrets. `fly.toml` sets the host, port, session path, key id, and issuer. `SIGNET_TEST` stays unset.
 
@@ -85,7 +85,8 @@ A push to `master` deploys after the test workflow passes. The GitHub secret `FL
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `SIGNET_SESSIONS` | yes | Path of the session file. The directory is created when the first session is saved. The process loads the file at startup, so a person stays signed in across a restart while the file remains. |
+| `SIGNET_SESSIONS` | without `DATABASE_URL` | Path of the session file. The directory is created when the first session is saved. The process loads the file at startup, so a person stays signed in across a restart while the file remains. |
+| `DATABASE_URL` | no | Postgres connection string. When set, the process stores sessions and grants in Postgres and applies the schema migration at startup. `SIGNET_SESSIONS` is not used for persistence. When unset, sessions stay in the `SIGNET_SESSIONS` file and grants stay in `agent-grants.json` beside that file. On the public host, set `DATABASE_URL` as a Fly secret. |
 | `SIGNET_PRIVATE_KEY` | yes | Signing key, standard base64 of 32 bytes. |
 | `SIGNET_DERIVATION_KEY` | yes | Derivation key, standard base64 of 32 bytes. It must differ from the signing key. |
 | `SIGNET_PORT` | no | Listen port. Default `8787`. Set it in the environment. |
@@ -123,7 +124,7 @@ Proofs expire 15 minutes after Signet signs them. Checking one is covered in the
 | `GET /agents/skill` | Markdown that teaches an agent how to finish Allow after `403`. |
 | `POST /logout` | Ends the browser session. |
 
-Grants are stored in `agent-grants.json` beside the sessions file (on Fly, `/data/agent-grants.json`). Each row names the owner (`provider` and `subject`), the agent public key, a label, and `createdAt`. A missing or corrupt grants file leaves every agent unauthorized and does not stop the process. Browser sign-out does not revoke grants.
+Grants are stored in `agent-grants.json` beside the sessions file (on Fly, `/data/agent-grants.json`). Each row names the owner (`provider` and `subject`), the agent public key, a label, and `createdAt`. A missing or corrupt grants file leaves every agent unauthorized and does not stop the process. Browser sign-out does not revoke grants. When `DATABASE_URL` is set, the process stores sessions and grants in Postgres and does not read or write those JSON files.
 
 The session cookie lasts 400 days. It is marked `Secure` for an `https` issuer and for loopback. For any other `http` issuer it is stored without that mark.
 
