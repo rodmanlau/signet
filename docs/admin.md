@@ -79,6 +79,14 @@ The image starts `@agenticage/server` directly and does not read `login.env`. Se
 
 A push to `master` deploys after the test workflow passes. The GitHub secret `FLY_API_TOKEN` is a Fly deploy token. Pull requests run tests and do not deploy.
 
+## Cut over to Postgres
+
+Follow the [Postgres cutover checklist](superpowers/plans/postgres-cutover-checklist.md) to move the public host from the volume files to Managed Postgres. The checklist creates the cluster with `fly mpg create`, attaches it to `signet` with `fly mpg attach`, and sets `DATABASE_URL` as a Fly secret. Do not put `DATABASE_URL` in `fly.toml`.
+
+Keep the Fly volume for one clean week after cutover. Do not delete the volume in this change. The JSON files on the volume are the rollback copy. Unset `DATABASE_URL` and restart. The process reads those files again.
+
+Local and dev runs leave `DATABASE_URL` unset. Sessions stay in the `SIGNET_SESSIONS` file. Grants stay in `agent-grants.json` beside that file.
+
 ## Variables
 
 `login.env` is `NAME=VALUE` lines. Blank lines and lines that start with `#` are ignored. The start script reads a name from the file only when the environment has not already set it. A program that checks proofs does not read these names.
