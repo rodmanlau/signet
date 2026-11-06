@@ -4,6 +4,7 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
+    "import-json": "node scripts/import-json-to-postgres.mjs",
     "test": "npm run build -w @agenticage/proof && vitest run"
   },
   "devDependencies": {
