@@ -21,7 +21,7 @@ export type AgentGrantRecord = {
 
 export type AgentGrantFile = AgentGrantRecord[]
 
-export type GrantStore = Map<string, AgentGrant>
+export type GrantMap = Map<string, AgentGrant>
 
 const SUBJECT_MAX = 512
 const LABEL_MAX = 200
@@ -30,7 +30,7 @@ export function grantsFilePath(sessionsFile: string): string {
   return join(dirname(sessionsFile), 'agent-grants.json')
 }
 
-export async function loadGrants(file: string): Promise<GrantStore> {
+export async function loadGrants(file: string): Promise<GrantMap> {
   let text: string
   try {
     text = await readFile(file, 'utf8')
@@ -53,7 +53,7 @@ export async function loadGrants(file: string): Promise<GrantStore> {
   }
 }
 
-export async function writeGrants(file: string, store: GrantStore): Promise<void> {
+export async function writeGrants(file: string, store: GrantMap): Promise<void> {
   const records: AgentGrantFile = []
   for (const grant of store.values()) {
     records.push({
@@ -78,12 +78,12 @@ export async function writeGrants(file: string, store: GrantStore): Promise<void
   }
 }
 
-export function isGranted(store: GrantStore, publicKey: Uint8Array): boolean {
+export function isGranted(store: GrantMap, publicKey: Uint8Array): boolean {
   if (publicKey.length !== 32) return false
   return store.has(agentSubject(publicKey))
 }
 
-export function upsertGrant(store: GrantStore, grant: AgentGrant): boolean {
+export function upsertGrant(store: GrantMap, grant: AgentGrant): boolean {
   if (!validGrant(grant)) return false
   const key = agentSubject(grant.publicKey)
   const existing = store.get(key)
@@ -102,7 +102,7 @@ export function upsertGrant(store: GrantStore, grant: AgentGrant): boolean {
   return true
 }
 
-export function listForOwner(store: GrantStore, ownerProvider: ProviderName, ownerSubject: string): AgentGrant[] {
+export function listForOwner(store: GrantMap, ownerProvider: ProviderName, ownerSubject: string): AgentGrant[] {
   const rows: AgentGrant[] = []
   for (const grant of store.values()) {
     if (grant.ownerProvider === ownerProvider && grant.ownerSubject === ownerSubject) rows.push(grant)
@@ -111,7 +111,7 @@ export function listForOwner(store: GrantStore, ownerProvider: ProviderName, own
 }
 
 export function revokeGrant(
-  store: GrantStore,
+  store: GrantMap,
   ownerProvider: ProviderName,
   ownerSubject: string,
   publicKey: Uint8Array,
@@ -125,9 +125,9 @@ export function revokeGrant(
   return true
 }
 
-function parseGrantFile(parsed: unknown): GrantStore | null {
+function parseGrantFile(parsed: unknown): GrantMap | null {
   if (!Array.isArray(parsed)) return null
-  const store: GrantStore = new Map()
+  const store: GrantMap = new Map()
   for (const item of parsed) {
     const grant = recordToGrant(item)
     if (!grant) return null

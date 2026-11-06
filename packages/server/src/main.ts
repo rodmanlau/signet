@@ -1,7 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { getPublicKey } from '@noble/ed25519'
 import { agentRequestOk } from '@agenticage/proof'
@@ -14,17 +13,15 @@ import {
   destinationName,
   type LoginSession,
 } from './connect.js'
+import { grantsFilePath, type AgentGrant } from './grants.js'
 import {
-  grantsFilePath,
-  isGranted,
-  listForOwner,
-  loadGrants,
-  revokeGrant,
-  upsertGrant,
-  writeGrants,
-  type AgentGrant,
+  createWriteQueue,
+  isLoginSession,
+  openJsonGrantStore,
+  openJsonSessionStore,
   type GrantStore,
-} from './grants.js'
+  type SessionStore,
+} from './stores.js'
 
 export type Exchange = (code: string) => Promise<{ subject: string; label: string }>
 
@@ -58,7 +55,7 @@ const SESSION_MAX_AGE = 400 * 24 * 60 * 60
 const OAUTH_FLAGS = 'HttpOnly; Secure; SameSite=None; Path=/'
 const OAUTH_DOMAIN = 'valar.login.oauth.v1'
 const OAUTH_SECONDS = 600
-const LIMIT = { audience: 512, returnUrl: 4096, site: 200, subject: 512, label: 200, code: 2048 }
+const LIMIT = { audience: 512, returnUrl: 4096, site: 200, label: 200, code: 2048 }
 const ID_TOKEN = /^[A-Za-z0-9_-]{16,128}$/
 
 const AUTHORIZE: Record<ProviderName, string> = {
@@ -103,12 +100,9 @@ type Ctx = {
   now: () => number
   providers: Partial<Record<ProviderName, LoginProvider>>
   testLogin: boolean
-  sessionsFile: string
-  sessions: Map<string, LoginSession>
-  grantsFile: string
+  sessions: SessionStore
   grants: GrantStore
   tickets: Map<string, AgentTicket>
-  writing: Promise<void>
   usedNonces: Map<string, true>
 }
 
@@ -126,9 +120,10 @@ export async function startLogin(
   const issuer = canonicalIssuer(options.issuer)
   const sessionsFile = (options.sessionsFile ?? process.env.SIGNET_SESSIONS ?? '').trim()
   if (sessionsFile === '') throw new Error('SIGNET_SESSIONS is required')
-  const sessions = await loadSessions(sessionsFile)
+  const queue = createWriteQueue()
+  const sessions = await openJsonSessionStore(sessionsFile, queue)
   const grantsFile = grantsFilePath(sessionsFile)
-  const grants = await loadGrants(grantsFile)
+  const grants = await openJsonGrantStore(grantsFile, queue)
   // Sync getPublicKey needs SHA-512. Importing @agenticage/proof wires it.
   const derived = getPublicKey(options.privateKey)
   if (options.publicKey && !sameBytes(options.publicKey, derived)) {
@@ -143,12 +138,9 @@ export async function startLogin(
     now: () => Math.floor(options.now ? options.now() : Date.now() / 1000),
     providers: options.providers ?? {},
     testLogin: options.testLogin ?? process.env.SIGNET_TEST === '1',
-    sessionsFile,
     sessions,
-    grantsFile,
     grants,
     tickets: new Map(),
-    writing: Promise.resolve(),
     usedNonces: new Map(),
   }
   if (ctx.testLogin) process.stderr.write('SIGNET_TEST is on; POST /test-login can mint a session\n')
@@ -254,7 +246,7 @@ async function handleLogout(req: IncomingMessage, res: ServerResponse, ctx: Ctx)
   const stored = readSession(ctx, req.headers.cookie)
   if (stored) ctx.sessions.delete(stored.id)
   try {
-    await persist(ctx)
+    await ctx.sessions.persist()
   } catch (error) {
     if (stored) ctx.sessions.set(stored.id, { provider: stored.provider, subject: stored.subject, label: stored.label })
     throw error
@@ -312,7 +304,7 @@ async function handleSignOut(req: IncomingMessage, res: ServerResponse, ctx: Ctx
   if (req.method === 'POST' && stored) {
     ctx.sessions.delete(stored.id)
     try {
-      await persist(ctx)
+      await ctx.sessions.persist()
     } catch (error) {
       ctx.sessions.set(stored.id, { provider: stored.provider, subject: stored.subject, label: stored.label })
       throw error
@@ -391,7 +383,7 @@ async function readTestSession(req: IncomingMessage): Promise<LoginSession | nul
     subject: 'subject' in parsed ? parsed.subject : undefined,
     label: 'label' in parsed ? parsed.label : undefined,
   }
-  if (!validSession(session)) return null
+  if (!isLoginSession(session)) return null
   return session
 }
 
@@ -416,7 +408,7 @@ async function handleAgentProof(req: IncomingMessage, res: ServerResponse, ctx: 
     keyId: ctx.keyId,
     privateKey: ctx.privateKey,
     derivationKey: ctx.derivationKey,
-    granted: isGranted(ctx.grants, body.publicKey),
+    granted: ctx.grants.isGranted(body.publicKey),
   })
   if (decision.type === 'reject') return sendText(res, 400, 'rejected')
   if (decision.type === 'unauthorized') {
@@ -552,7 +544,7 @@ async function handleAgentApprove(req: IncomingMessage, res: ServerResponse, ctx
     label: ticket.label,
     createdAt: ctx.now(),
   }
-  const existing = ctx.grants.get(agentSubject(ticket.publicKey))
+  const existing = ctx.grants.get(ticket.publicKey)
   if (
     existing &&
     (existing.ownerProvider !== grant.ownerProvider || existing.ownerSubject !== grant.ownerSubject)
@@ -575,7 +567,7 @@ async function handleAgents(req: IncomingMessage, res: ServerResponse, ctx: Ctx)
     sendHtml(res, 200, agentSignInPage(ctx, '/agents', 'To see your agents, choose an account.'))
     return
   }
-  sendHtml(res, 200, agentsPage(listForOwner(ctx.grants, session.provider, session.subject)))
+  sendHtml(res, 200, agentsPage(ctx.grants.listForOwner(session.provider, session.subject)))
 }
 
 async function handleAgentRevoke(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
@@ -629,23 +621,14 @@ Send the person to /agents to revoke a grant. Each row has Revoke.
 `
 
 async function commitGrant(ctx: Ctx, grant: AgentGrant): Promise<boolean> {
-  const key = agentSubject(grant.publicKey)
-  const existing = ctx.grants.get(key)
-  const previous = existing
-    ? {
-        ownerProvider: existing.ownerProvider,
-        ownerSubject: existing.ownerSubject,
-        publicKey: Uint8Array.from(existing.publicKey),
-        label: existing.label,
-        createdAt: existing.createdAt,
-      }
-    : undefined
-  if (!upsertGrant(ctx.grants, grant)) return false
+  const existing = ctx.grants.get(grant.publicKey)
+  const previous = existing ? copyGrant(existing) : undefined
+  if (!ctx.grants.upsert(grant)) return false
   try {
-    await persistGrants(ctx)
+    await ctx.grants.persist()
   } catch (error) {
-    if (previous) ctx.grants.set(key, previous)
-    else ctx.grants.delete(key)
+    if (previous) ctx.grants.upsert(previous)
+    else ctx.grants.revoke(grant.ownerProvider, grant.ownerSubject, grant.publicKey)
     throw error
   }
   return true
@@ -657,23 +640,26 @@ async function commitRevoke(
   ownerSubject: string,
   publicKey: Uint8Array,
 ): Promise<void> {
-  const key = agentSubject(publicKey)
-  const existing = ctx.grants.get(key)
+  const existing = ctx.grants.get(publicKey)
   if (!existing) return
   if (existing.ownerProvider !== ownerProvider || existing.ownerSubject !== ownerSubject) return
-  const previous = {
-    ownerProvider: existing.ownerProvider,
-    ownerSubject: existing.ownerSubject,
-    publicKey: Uint8Array.from(existing.publicKey),
-    label: existing.label,
-    createdAt: existing.createdAt,
-  }
-  if (!revokeGrant(ctx.grants, ownerProvider, ownerSubject, publicKey)) return
+  const previous = copyGrant(existing)
+  if (!ctx.grants.revoke(ownerProvider, ownerSubject, publicKey)) return
   try {
-    await persistGrants(ctx)
+    await ctx.grants.persist()
   } catch (error) {
-    ctx.grants.set(key, previous)
+    ctx.grants.upsert(previous)
     throw error
+  }
+}
+
+function copyGrant(grant: AgentGrant): AgentGrant {
+  return {
+    ownerProvider: grant.ownerProvider,
+    ownerSubject: grant.ownerSubject,
+    publicKey: Uint8Array.from(grant.publicKey),
+    label: grant.label,
+    createdAt: grant.createdAt,
   }
 }
 
@@ -779,7 +765,7 @@ async function handleCallback(
     return failLogin(res, ctx.issuer, pending)
   }
   const session = { provider, subject: result.subject, label: result.label }
-  if (!validSession(session)) return failLogin(res, ctx.issuer, pending)
+  if (!isLoginSession(session)) return failLogin(res, ctx.issuer, pending)
   const previous = readSession(ctx, req.headers.cookie)
   const prior = readCookie(req.headers.cookie, PRIOR_COOKIE)
   const drop: string[] = []
@@ -1099,7 +1085,7 @@ async function issueSession(ctx: Ctx, session: LoginSession, previousId?: string
   }
   ctx.sessions.set(id, session)
   try {
-    await persist(ctx)
+    await ctx.sessions.persist()
   } catch (error) {
     ctx.sessions.delete(id)
     for (const [prior, record] of saved) ctx.sessions.set(prior, record)
@@ -1138,80 +1124,6 @@ function readSession(ctx: Ctx, header: string | undefined): StoredSession | null
   return { id, provider: session.provider, subject: session.subject, label: session.label }
 }
 
-async function loadSessions(file: string): Promise<Map<string, LoginSession>> {
-  let text: string
-  try {
-    text = await readFile(file, 'utf8')
-  } catch (error) {
-    if (isEnoent(error)) return new Map()
-    throw error
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    throw new Error('SIGNET_SESSIONS must be a JSON object of sessions')
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('SIGNET_SESSIONS must be a JSON object of sessions')
-  }
-  const sessions = new Map<string, LoginSession>()
-  for (const [id, value] of Object.entries(parsed)) {
-    if (!ID_TOKEN.test(id) || typeof value !== 'object' || value === null) {
-      throw new Error('SIGNET_SESSIONS must be a JSON object of sessions')
-    }
-    const session = {
-      provider: 'provider' in value ? value.provider : undefined,
-      subject: 'subject' in value ? value.subject : undefined,
-      label: 'label' in value ? value.label : undefined,
-    }
-    if (!validSession(session)) throw new Error('SIGNET_SESSIONS must be a JSON object of sessions')
-    sessions.set(id, session)
-  }
-  return sessions
-}
-
-async function persist(ctx: Ctx): Promise<void> {
-  const run = ctx.writing.then(() => writeSessions(ctx.sessionsFile, ctx.sessions))
-  ctx.writing = run.then(
-    () => undefined,
-    () => undefined,
-  )
-  await run
-}
-
-async function persistGrants(ctx: Ctx): Promise<void> {
-  const run = ctx.writing.then(() => writeGrants(ctx.grantsFile, ctx.grants))
-  ctx.writing = run.then(
-    () => undefined,
-    () => undefined,
-  )
-  await run
-}
-
-async function writeSessions(file: string, sessions: Map<string, LoginSession>): Promise<void> {
-  const body: Record<string, LoginSession> = {}
-  for (const [id, session] of sessions) {
-    body[id] = { provider: session.provider, subject: session.subject, label: session.label }
-  }
-  const dir = dirname(file)
-  await mkdir(dir, { recursive: true })
-  const tmp = join(dir, `.${basename(file)}.${randomBytes(6).toString('hex')}.tmp`)
-  try {
-    await writeFile(tmp, JSON.stringify(body), { encoding: 'utf8', mode: 0o600 })
-    await chmod(tmp, 0o600)
-    await rename(tmp, file)
-    await chmod(file, 0o600)
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined)
-    throw error
-  }
-}
-
-function isEnoent(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
-}
-
 function openPending(ctx: Ctx, token: string): PendingLogin | null {
   const raw = unseal(ctx.derivationKey, OAUTH_DOMAIN, token)
   if (!raw) return null
@@ -1244,24 +1156,6 @@ function openPending(ctx: Ctx, token: string): PendingLogin | null {
   if (site === undefined) return { provider, audience, returnUrl, nonce, exp }
   if (typeof site !== 'string' || site.length > LIMIT.site) return null
   return { provider, audience, returnUrl, site, nonce, exp }
-}
-
-function validSession(value: {
-  provider: unknown
-  subject: unknown
-  label: unknown
-}): value is LoginSession {
-  return (
-    isProvider(value.provider) &&
-    typeof value.subject === 'string' &&
-    value.subject.length > 0 &&
-    value.subject.length <= LIMIT.subject &&
-    typeof value.label === 'string' &&
-    value.label.length > 0 &&
-    value.label.length <= LIMIT.label &&
-    !/[\r\n\0]/.test(value.subject) &&
-    !/[\r\n\0]/.test(value.label)
-  )
 }
 
 function isProvider(value: unknown): value is ProviderName {

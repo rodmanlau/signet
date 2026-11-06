@@ -6,7 +6,7 @@ import { keygenAsync as generateKeyPair } from '@noble/ed25519'
 import { signProof, verifyProof } from '@agenticage/proof'
 import { expect, it } from 'vitest'
 import { agentSubject, deriveIdentity } from '../../server/src/identity.js'
-import { grantsFilePath, upsertGrant, writeGrants, type GrantStore } from '../../server/src/grants.js'
+import { grantsFilePath, upsertGrant, writeGrants, type GrantMap } from '../../server/src/grants.js'
 import { startLogin } from '../../server/src/main.js'
 import { runSignetClient } from '../src/run.js'
 
@@ -529,7 +529,7 @@ function publicFromLog(line: string): Uint8Array {
 }
 
 async function grantAgent(sessionsFile: string, publicKey: Uint8Array): Promise<void> {
-  const store: GrantStore = new Map()
+  const store: GrantMap = new Map()
   const saved = upsertGrant(store, {
     ownerProvider: 'google',
     ownerSubject: 'owner-1',
