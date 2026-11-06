@@ -167,6 +167,7 @@ describe('login origin', () => {
       testLogin: false,
       providers: {},
       sessionsFile: sessions.file,
+      databaseUrl: '',
     })
     try {
       for (const name of ['google', 'apple', 'facebook']) {
@@ -200,6 +201,7 @@ describe('login origin', () => {
       now: () => 1_700_000_000,
       testLogin: false,
       sessionsFile: sessions.file,
+      databaseUrl: '',
       providers: {
         google: { clientId: 'google-client', exchange: async () => ({ subject: 's', label: 'Ada' }) },
         apple: { clientId: 'apple-client', exchange: async () => ({ subject: 's', label: 'Ada' }) },
@@ -280,6 +282,7 @@ describe('login origin', () => {
         testLogin,
         providers,
         sessionsFile: sessions.file,
+        databaseUrl: '',
       })
       const connect = new URL('/connect', server.url)
       connect.searchParams.set('audience', 'https://friends.example')
@@ -335,6 +338,7 @@ describe('login origin', () => {
       now: () => 1_700_000_000,
       testLogin: false,
       sessionsFile: sessions.file,
+      databaseUrl: '',
       providers: {
         google: {
           clientId: 'google-client',
@@ -491,6 +495,7 @@ describe('login origin', () => {
       testLogin: true,
       providers: {},
       sessionsFile: sessions.file,
+      databaseUrl: '',
     })
     try {
       const res = await fetch(new URL('/test-login', server.url), {
@@ -537,6 +542,7 @@ describe('login origin', () => {
       testLogin: true as const,
       providers: {},
       sessionsFile: sessions.file,
+      databaseUrl: '',
     }
     const first = await startLogin(options)
     let cookie = ''
@@ -606,6 +612,7 @@ describe('login origin', () => {
         publicKey,
         derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
         sessionsFile: sessions.file,
+        databaseUrl: '',
       }),
     ).rejects.toThrow(/SIGNET_SESSIONS/)
     await sessions.remove()
@@ -629,6 +636,7 @@ describe('login origin', () => {
       testLogin: true,
       providers: {},
       sessionsFile: sessions.file,
+      databaseUrl: '',
     })
     try {
       const connect = new URL('/connect', server.url)
@@ -695,6 +703,7 @@ describe('login origin', () => {
       testLogin: true,
       providers: {},
       sessionsFile: sessions.file,
+      databaseUrl: '',
     })
     try {
       const res = await fetch(new URL('/test-login', server.url), {
@@ -726,6 +735,7 @@ describe('login origin', () => {
           privateKey: secretKey,
           publicKey,
           derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+          databaseUrl: '',
         }),
       ).rejects.toThrow(/SIGNET_SESSIONS is required/)
     } finally {
@@ -749,6 +759,7 @@ describe('login origin', () => {
           privateKey: secretKey,
           publicKey,
           derivationKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+          databaseUrl: '',
         }),
       ).rejects.toThrow(/SIGNET_SESSIONS is required/)
     } finally {
@@ -773,6 +784,7 @@ describe('login origin', () => {
       testLogin: true,
       providers: {},
       sessionsFile: sessions.file,
+      databaseUrl: '',
     })
     try {
       const minted = await fetch(new URL('/test-login', server.url), {
@@ -868,6 +880,7 @@ describe('login origin', () => {
       now: () => 1_700_000_000,
       testLogin: true,
       sessionsFile: sessionsOn.file,
+      databaseUrl: '',
       providers: {
         google: { clientId: 'google-client', authorizeUrl: 'https://provider.test/auth', exchange },
         apple: { clientId: 'apple-client', authorizeUrl: 'https://apple.test/auth', exchange },
@@ -964,6 +977,7 @@ describe('login origin', () => {
       testLogin: false,
       providers: {},
       sessionsFile: quietSessions.file,
+      databaseUrl: '',
     })
     const formSessions = await tempSessions()
     const form = await startLogin({
@@ -977,6 +991,7 @@ describe('login origin', () => {
       testLogin: true,
       providers: {},
       sessionsFile: formSessions.file,
+      databaseUrl: '',
     })
     try {
       const quietPage = new URL('/switch', quiet.url)
@@ -1027,6 +1042,7 @@ describe('login origin', () => {
       now: () => 1_700_000_000,
       testLogin: true,
       sessionsFile: sessions.file,
+      databaseUrl: '',
       providers: {
         google: {
           clientId: 'google-client',
@@ -1111,6 +1127,7 @@ describe('login origin', () => {
       now: () => 1_700_000_000,
       testLogin: true,
       sessionsFile: sessions.file,
+      databaseUrl: '',
       providers: {
         apple: {
           clientId: 'apple-client',
@@ -1228,6 +1245,7 @@ describe('login origin', () => {
       testLogin: true,
       providers: {},
       sessionsFile: sessions.file,
+      databaseUrl: '',
     })
     try {
       const minted = await fetch(new URL('/test-login', server.url), {
@@ -1391,6 +1409,7 @@ describe('decideAgentProof', () => {
       now: () => now,
       testLogin: false,
       sessionsFile: sessions.file,
+      databaseUrl: '',
     })
     try {
       const audience = 'http://127.0.0.1:8080'
@@ -1536,6 +1555,7 @@ function loginFor(sessionsFile: string, secretKey: Uint8Array, publicKey: Uint8A
     now: () => now,
     testLogin: false,
     sessionsFile,
+    databaseUrl: '',
   }
 }
 

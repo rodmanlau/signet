@@ -9,6 +9,22 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: signet
+          POSTGRES_PASSWORD: signet
+          POSTGRES_DB: signet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U signet -d signet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://signet:signet@127.0.0.1:5432/signet
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

@@ -14,6 +14,7 @@ import {
   type LoginSession,
 } from './connect.js'
 import { grantsFilePath, type AgentGrant } from './grants.js'
+import { connectDatabase } from './pg-store.js'
 import {
   createWriteQueue,
   isLoginSession,
@@ -43,6 +44,7 @@ export type LoginServerOptions = {
   providers?: Partial<Record<ProviderName, LoginProvider>>
   testLogin?: boolean
   sessionsFile?: string
+  databaseUrl?: string
 }
 
 const PROVIDERS: ProviderName[] = ['google', 'apple', 'facebook']
@@ -118,56 +120,80 @@ export async function startLogin(
   }
   if (options.keyId.length === 0 || Buffer.byteLength(options.keyId) > 255) throw new Error('bad key id')
   const issuer = canonicalIssuer(options.issuer)
-  const sessionsFile = (options.sessionsFile ?? process.env.SIGNET_SESSIONS ?? '').trim()
-  if (sessionsFile === '') throw new Error('SIGNET_SESSIONS is required')
-  const queue = createWriteQueue()
-  const sessions = await openJsonSessionStore(sessionsFile, queue)
-  const grantsFile = grantsFilePath(sessionsFile)
-  const grants = await openJsonGrantStore(grantsFile, queue)
-  // Sync getPublicKey needs SHA-512. Importing @agenticage/proof wires it.
-  const derived = getPublicKey(options.privateKey)
-  if (options.publicKey && !sameBytes(options.publicKey, derived)) {
-    throw new Error('public key does not match private key')
+  const databaseUrl = (options.databaseUrl ?? process.env.DATABASE_URL ?? '').trim()
+  let endPool: (() => Promise<void>) | undefined
+  const releasePool = async () => {
+    const end = endPool
+    endPool = undefined
+    await end?.()
   }
-  const ctx: Ctx = {
-    issuer,
-    keyId: options.keyId,
-    privateKey: options.privateKey,
-    publicKey: options.publicKey ?? derived,
-    derivationKey: options.derivationKey,
-    now: () => Math.floor(options.now ? options.now() : Date.now() / 1000),
-    providers: options.providers ?? {},
-    testLogin: options.testLogin ?? process.env.SIGNET_TEST === '1',
-    sessions,
-    grants,
-    tickets: new Map(),
-    usedNonces: new Map(),
-  }
-  if (ctx.testLogin) process.stderr.write('SIGNET_TEST is on; POST /test-login can mint a session\n')
-
-  const httpServer = createServer((req, res) => {
-    void handle(req, res, ctx)
-  })
-  const host = options.host?.trim() || '127.0.0.1'
   try {
-    await listen(httpServer, options.port ?? 0, host)
+    let sessions: SessionStore
+    let grants: GrantStore
+    if (databaseUrl !== '') {
+      const db = await connectDatabase(databaseUrl)
+      sessions = db.sessions
+      grants = db.grants
+      endPool = () => db.close()
+    } else {
+      const sessionsFile = (options.sessionsFile ?? process.env.SIGNET_SESSIONS ?? '').trim()
+      if (sessionsFile === '') throw new Error('SIGNET_SESSIONS is required')
+      const queue = createWriteQueue()
+      sessions = await openJsonSessionStore(sessionsFile, queue)
+      grants = await openJsonGrantStore(grantsFilePath(sessionsFile), queue)
+    }
+    // Sync getPublicKey needs SHA-512. Importing @agenticage/proof wires it.
+    const derived = getPublicKey(options.privateKey)
+    if (options.publicKey && !sameBytes(options.publicKey, derived)) {
+      throw new Error('public key does not match private key')
+    }
+    const ctx: Ctx = {
+      issuer,
+      keyId: options.keyId,
+      privateKey: options.privateKey,
+      publicKey: options.publicKey ?? derived,
+      derivationKey: options.derivationKey,
+      now: () => Math.floor(options.now ? options.now() : Date.now() / 1000),
+      providers: options.providers ?? {},
+      testLogin: options.testLogin ?? process.env.SIGNET_TEST === '1',
+      sessions,
+      grants,
+      tickets: new Map(),
+      usedNonces: new Map(),
+    }
+    if (ctx.testLogin) process.stderr.write('SIGNET_TEST is on; POST /test-login can mint a session\n')
+
+    const httpServer = createServer((req, res) => {
+      void handle(req, res, ctx)
+    })
+    const host = options.host?.trim() || '127.0.0.1'
+    try {
+      await listen(httpServer, options.port ?? 0, host)
+    } catch (error) {
+      httpServer.close()
+      throw error
+    }
+    const address = httpServer.address()
+    if (!address || typeof address === 'string') {
+      httpServer.close()
+      throw new Error('expected a tcp port')
+    }
+    return {
+      url: `http://${host}:${address.port}`,
+      async close() {
+        try {
+          httpServer.closeAllConnections()
+          await new Promise<void>((resolve, reject) => {
+            httpServer.close((error) => (error ? reject(error) : resolve()))
+          })
+        } finally {
+          await releasePool()
+        }
+      },
+    }
   } catch (error) {
-    httpServer.close()
+    await releasePool()
     throw error
-  }
-  const address = httpServer.address()
-  if (!address || typeof address === 'string') {
-    httpServer.close()
-    throw new Error('expected a tcp port')
-  }
-  return {
-    url: `http://${host}:${address.port}`,
-    async close() {
-      httpServer.closeAllConnections()
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => (error ? reject(error) : resolve()))
-      })
-    },
   }
 }
 
@@ -1324,6 +1350,7 @@ function loginFromEnv(): LoginServerOptions {
   const derivationKey = envBytes('SIGNET_DERIVATION_KEY')
   const keyId = process.env.SIGNET_KEY_ID ?? 'k1'
   const issuer = process.env.SIGNET_ISSUER ?? `http://${host}:${port}`
+  const databaseUrl = process.env.DATABASE_URL?.trim()
   return {
     port,
     host,
@@ -1333,6 +1360,7 @@ function loginFromEnv(): LoginServerOptions {
     derivationKey,
     providers: providersFromEnv(canonicalIssuer(issuer)),
     testLogin: process.env.SIGNET_TEST === '1',
+    ...(databaseUrl ? { databaseUrl } : {}),
   }
 }
 

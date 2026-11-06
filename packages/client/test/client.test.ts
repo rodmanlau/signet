@@ -76,6 +76,7 @@ it('prints nine agent steps and hides the secret and the proof', async () => {
     now: () => Math.floor(Date.now() / 1000),
     testLogin: false,
     sessionsFile: sessions,
+    databaseUrl: '',
   })
   try {
     const lines: string[] = []
@@ -130,6 +131,7 @@ it('stops after a rejected agent proof', async () => {
     now: () => 0,
     testLogin: false,
     sessionsFile: join(dir, 'sessions.json'),
+    databaseUrl: '',
   })
   try {
     const lines: string[] = []
@@ -169,6 +171,7 @@ it('prints the skill and approve URL, then verifies a proof after Allow', async 
     now: () => Math.floor(Date.now() / 1000),
     testLogin: true,
     sessionsFile: join(dir, 'sessions.json'),
+    databaseUrl: '',
   })
   const lines: string[] = []
   const pending = runSignetClient(['--agent', origin, audience, agentKey, publicKeys, '--label', 'Cursor'], (line) =>
@@ -295,6 +298,7 @@ it('resolves file arguments from the directory where npm was started', async () 
     now: () => Math.floor(Date.now() / 1000),
     testLogin: false,
     sessionsFile: join(invoked, 'sessions.json'),
+    databaseUrl: '',
   })
   const previousCwd = process.cwd()
   const previousInit = process.env.INIT_CWD

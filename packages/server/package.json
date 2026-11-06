@@ -8,12 +8,14 @@
     "start": "tsx src/main.ts"
   },
   "dependencies": {
+    "@agenticage/proof": "*",
     "@noble/ed25519": "^3.2.0",
     "@noble/hashes": "^2.4.0",
-    "@agenticage/proof": "*",
+    "pg": "^8.23.1",
     "tldts": "^7.4.15"
   },
   "devDependencies": {
+    "@types/pg": "^8.23.1",
     "tsx": "^4.20.5"
   }
 }
