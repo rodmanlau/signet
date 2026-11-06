@@ -37,12 +37,17 @@ type GrantRow = {
 }
 
 export function createPgPool(databaseUrl: string): Pool {
-  return new Pool({
+  const pool = new Pool({
     connectionString: databaseUrl,
     max: 10,
     idleTimeoutMillis: 300_000,
     maxLifetimeSeconds: 600,
   })
+  // Idle clients emit when Postgres restarts; without a listener the process exits.
+  pool.on('error', (error) => {
+    process.stderr.write(`postgres pool error: ${error.message}\n`)
+  })
+  return pool
 }
 
 export async function applyMigrations(pool: Pool): Promise<void> {
