@@ -69,6 +69,21 @@ The sign-in page prints a code when it cannot offer an account.
 | --- | --- | --- |
 | `no-provider` | No provider client id is set, and `SIGNET_TEST` is not `1`. The page says `Sign-in is not set up.` and shows no account button. | Set `SIGNET_GOOGLE_CLIENT_ID`, `SIGNET_APPLE_CLIENT_ID`, or `SIGNET_FACEBOOK_CLIENT_ID`. A client secret without its client id leaves the code in place. On the public host, deploy the secrets so the machine boots with them. |
 
+## Loopback test issuer
+
+This is a separate process for a browser test of `http://127.0.0.1:8080`. It is not `SIGNET_TEST`, and it does not sign with the production keys.
+
+```text
+node scripts/setup-loopback.mjs
+node scripts/start-loopback.mjs
+```
+
+The default directory is `.signet-loopback/`. It is gitignored. Setup writes a signing key, a derivation key, `identity-keys.json`, and `login.env`. The env file names `SIGNET_LOOPBACK_PRIVATE_KEY`, `SIGNET_LOOPBACK_DERIVATION_KEY`, and `SIGNET_LOOPBACK_KEY_ID`. It does not set `SIGNET_TEST`. Pass a directory when the keys should live somewhere else. A second run keeps both keys and keeps `login.env`.
+
+The process listens on `127.0.0.1:8790`. The issuer origin is `http://127.0.0.1:8790`. Set `SIGNET_LOOPBACK_PORT` to choose another port. Port `8080` is rejected. `SIGNET_HOST` may be unset or `127.0.0.1`. Any other host stops the process. `SIGNET_ISSUER` may be unset or `http://127.0.0.1:<port>`. A public issuer stops the process. `SIGNET_PRIVATE_KEY`, `SIGNET_DERIVATION_KEY`, or `SIGNET_TEST` in the environment stops the process.
+
+Give the local test `identity-keys.json` and the issuer origin. Leave this directory out of Fly secrets and out of the public host's key file. The image starts `@agenticage/server` and does not start this process. How a client checks the proof is in the [developer guide](develop.md).
+
 ## Public host
 
 Fly.io runs one machine from `Dockerfile` and `fly.toml`. The app name is `signet`, the region is `iad`, and the issuer is `https://signet.fly.dev`. The process listens on `0.0.0.0:8787`. Sessions are `/data/sessions.json` on that machine's volume. The machine stays up when idle. A deploy restarts that one machine. It does not add a second.

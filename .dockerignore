@@ -1,6 +1,7 @@
 .git
 .github
 .signet
+.signet-loopback
 node_modules
 dist
 *.tsbuildinfo

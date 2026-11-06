@@ -1,4 +1,5 @@
 .signet/
+.signet-loopback/
 .worktrees/
 node_modules/
 dist/
