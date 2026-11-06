@@ -93,6 +93,11 @@ type AgentTicket = {
   exp: number
 }
 
+type ProofCounts = {
+  granted: number
+  unauthorized: number
+}
+
 type Ctx = {
   issuer: string
   keyId: string
@@ -106,6 +111,7 @@ type Ctx = {
   grants: GrantStore
   tickets: Map<string, AgentTicket>
   usedNonces: Map<string, true>
+  proofs: ProofCounts
 }
 
 type ConnectQuery = { audience: string; returnUrl: string; site?: string }
@@ -160,6 +166,7 @@ export async function startLogin(
       grants,
       tickets: new Map(),
       usedNonces: new Map(),
+      proofs: { granted: 0, unauthorized: 0 },
     }
     if (ctx.testLogin) process.stderr.write('SIGNET_TEST is on; POST /test-login can mint a session\n')
 
@@ -207,6 +214,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (path === '/switch') return await handleSwitch(req, res, ctx, url)
     if (path === '/logout') return await handleLogout(req, res, ctx)
     if (path === '/test-login') return await handleTestLogin(req, res, ctx, url)
+    if (path === '/metrics') return handleMetrics(req, res, ctx)
     if (path === '/agent-proof') return await handleAgentProof(req, res, ctx)
     if (path === '/agents') return await handleAgents(req, res, ctx)
     if (path === '/agents/ticket') return await handleAgentTicket(req, res, ctx)
@@ -438,11 +446,19 @@ async function handleAgentProof(req: IncomingMessage, res: ServerResponse, ctx: 
   })
   if (decision.type === 'reject') return sendText(res, 400, 'rejected')
   if (decision.type === 'unauthorized') {
+    ctx.proofs.unauthorized += 1
     const payload = JSON.stringify({ error: 'unauthorized', skill: `${ctx.issuer}/agents/skill` })
     return sendText(res, 403, payload, { 'content-type': 'application/json; charset=utf-8' })
   }
+  ctx.proofs.granted += 1
   const proof = Buffer.from(decision.proof).toString('base64url')
   sendText(res, 200, JSON.stringify({ proof }), { 'content-type': 'application/json; charset=utf-8' })
+}
+
+function handleMetrics(req: IncomingMessage, res: ServerResponse, ctx: Ctx): void {
+  if (req.method !== 'GET') return sendText(res, 405, 'method not allowed', { allow: 'GET' })
+  const body = `signet_agent_proof_total ${ctx.proofs.granted}\nsignet_agent_proof_unauthorized_total ${ctx.proofs.unauthorized}\n`
+  sendText(res, 200, body)
 }
 
 function agentProofBody(parsed: unknown): {
