@@ -72,6 +72,33 @@ After Allow, a loopback ticket redirects to `{loopback}/#signet-agent=allowed`. 
 
 `signProof` is how the Signet process signs. Callers do not sign proofs.
 
+## Loopback test issuer
+
+A local browser test can join `http://127.0.0.1:8080` without a person. The loopback issuer is a separate process. It signs that audience only, with its own signing key and its own derivation key. Check the proof with `verifyProof`. Pass this process's origin as `issuer`, `http://127.0.0.1:8080` as `audience`, and the public key from its `identity-keys.json`.
+
+```text
+node scripts/setup-loopback.mjs
+node scripts/start-loopback.mjs
+```
+
+Setup writes `.signet-loopback/`. The process listens on `127.0.0.1:8790`. Its issuer origin is `http://127.0.0.1:8790`. It refuses another listen address, a public issuer, port `8080`, and an environment that has `SIGNET_PRIVATE_KEY`, `SIGNET_DERIVATION_KEY`, or `SIGNET_TEST`.
+
+Open the same connect URL a browser would open against Signet:
+
+```text
+GET /connect?audience=http://127.0.0.1:8080&return=http://127.0.0.1:8080/
+```
+
+The return URL's origin must be `http://127.0.0.1:8080`. The page redirects there with `#signet-proof=`. Any other audience is `400` `rejected`. There is no session, no provider, and no `/test-login`. `GET /.well-known/signet-keys` returns this process's public key.
+
+Every proof from one derivation key names the same subject. The provider is `google` and the subject is `local`. Clients on `http://127.0.0.1:8080` that trust this issuer all see that subject. A later proof from the same keys is the same subject with a new 15-minute expiry.
+
+A public origin needs a proof from production Signet. This issuer will not sign one. A proof it already signed fails `verifyProof` when the audience or the issuer differs, including when the audience is a public origin and when the issuer is `https://signet.fly.dev`.
+
+```text
+npm start -w @agenticage/client -- --human http://127.0.0.1:8790 http://127.0.0.1:8080 .signet-loopback/identity-keys.json
+```
+
 ## Reference client
 
 The client prints each step. It does not print the agent secret or the proof bytes.
