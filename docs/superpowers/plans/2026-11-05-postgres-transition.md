@@ -6,7 +6,7 @@ Move sessions and agent grants from JSON files on one Fly volume to Postgres. Pe
 
 One box is one unit of work. Every box names the evidence that checks it. A nested box is a sub-step of the box above it. Check a box only when its evidence exists, a file, a log line, a screenshot, a test run, or a SHA. The body is a how-to. The appendices explain and record.
 
-The program runs `pstack/skills/poteto-mode/playbooks/autopilot-stack.md`. Owners build and verify each PR to merge-ready. The operator lands PG-1 through PG-4 bottom-up. This repo's trunk branch is `master`. When a checklist line shows `origin/main`, fetch `origin/master` instead.
+The program runs `pstack/skills/poteto-mode/playbooks/autopilot-stack.md`. Owners build and verify each PR to merge-ready. The operator lands PG-1 through PG-4 bottom-up. This repo's integration branch is `develop`. Feature branches and PR bases use `develop`. When a checklist line shows `origin/main` for a pstack skill path, that path lives in the plugin, not this repo.
 
 Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
@@ -21,17 +21,17 @@ Tests alone are not sufficient verification. A PR is verified only when its unit
   - [ ] `git show origin/main:pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
   - [ ] `git show origin/main:pstack/skills/how/SKILL.md`
   - [ ] `git show origin/main:pstack/skills/technical-writing/SKILL.md`
-  - [ ] `git show origin/master:docs/superpowers/specs/2026-11-05-agent-login-authorization.md` after agent-login merges, or the tip of `cursor/agent-login-authorization-doc-cf52` until then
+  - [ ] `git show origin/develop:docs/superpowers/specs/2026-11-05-agent-login-authorization.md`
 - [ ] On the operator's go, arm the audit tick as `/loop 1h` with the tick prompt below. Never leave the cadence to memory.
 - [ ] Use this tick prompt, verbatim. "Re-read the execution playbook from trunk. Audit the operation against it and fix drift in this tick. Probe every active lane and judge progress by side effects only. Stand down a stuck lane and dispatch its replacement now. Then post a short status message to the operator in chat only when the audit found a tracked change that no earlier status message reported, such as a PR opened, a code-ready head, a round launched or closed, a verdict, a merge, a stuck agent and the action taken, a blocker added or cleared, or a decision only the operator can make. Name every such change and nothing else. Do not repeat a table, the merged list, or an unchanged blocker. If the audit found none, end the turn with no reply text. Either way, log this tick's row in your decision trail. The row names the items reported, or none."
 - [ ] On the operator's hold or stand-down, send every owner a zero-writes order at once.
-- [ ] Hold until https://github.com/rodmanlau/signet/pull/2 is merged, or stack every PG branch on that PR's head. Grants and Allow must exist before store ports wrap them.
+- [ ] Confirm agent-login is on `develop` before PG-1. Grants and Allow must exist before store ports wrap them.
 
 ### Spawn owners
 
 - [ ] Spawn one owner per PR with the full lifecycle the execution playbook names.
 - [ ] Follow this dependency graph. Start dependent work only after its parent merges, or base it on the parent branch when the execution playbook stacks.
-  - [ ] PG-1 is first. Branch from `master` after agent-login lands, or from the agent-login head.
+  - [ ] PG-1 is first. Branch from `develop`.
   - [ ] PG-2 after PG-1.
   - [ ] PG-3 after PG-2.
   - [ ] PG-4 after PG-3.
@@ -306,7 +306,7 @@ Unproven until execution
 
 ## Appendix C. Risks
 
-- Agent-login not yet on `master`. PG-1 must wait or stack. Watch PR 2.
+- Feature work must target `develop`, not `master`. PG owners open PRs with base `develop`.
 - Cutover mistakes leave empty grants and mass 403. PG-3 rollback drill is mandatory.
 - `cursor-team-kit` control skills may be absent on lane VMs. Lanes use `curl` and file artifacts. Watch boot recipe drift.
 - Pool exhaustion after scaling Signet machines without raising Postgres plan limits. Trigger T2 in Appendix E.
