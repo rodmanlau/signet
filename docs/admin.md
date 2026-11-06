@@ -114,8 +114,16 @@ Proofs expire 15 minutes after Signet signs them. Checking one is covered in the
 | `GET /sign-out?audience=<origin>&return=<url>` | Optional `site`. With a session, the page says `You are signed in as {label}.` and its button posts to this URL. The POST ends the browser session and redirects to `return` with `#signet-identity=signed-out`. With no session, the GET redirects there. The return URL's origin must equal `audience`. |
 | `POST /sign-out?audience=<origin>&return=<url>` | Returns `303` and the body `signed-out`. The fragment is `#signet-identity=signed-out`, replacing any fragment. It clears the session cookie and the OAuth cookie. With no session it redirects the same way. A return origin other than `audience` is `400` `rejected` with no `Location`. |
 | `GET /switch?audience=<origin>&return=<url>` | Optional `site`. With a session, the page says `You are signed in as {label}.` and offers the configured account buttons. The Google button asks Google to show its account chooser. With no session, the response is the sign-in page. A finished sign-in replaces the browser account and returns a proof in `#signet-proof=`. A failed sign-in redirects with `#signet-identity=failed` and leaves the account in place. |
-| `POST /agent-proof` | An agent asks for a proof and signs the request with its own key. This server stores nothing about that agent. |
+| `POST /agent-proof` | An agent asks for a proof and signs the request with its own key. The public key must already be on that person's grant list. Otherwise the response is `403` with `{ "error": "unauthorized", "skill": "<issuer>/agents/skill" }`. |
+| `POST /agents/ticket` | Starts Allow. Same signed fields as `/agent-proof`, plus `label` and optional `loopback`. Returns `{ "ticket", "approveUrl" }`. |
+| `GET /agents/approve?ticket=` | Allow page for that ticket. Without a session, the sign-in buttons return here. |
+| `POST /agents/approve?ticket=` | Writes the grant for the signed-in person. With `loopback`, redirects to `{loopback}/#signet-agent=allowed`. |
+| `GET /agents` | Lists this person's grants and offers Revoke. |
+| `POST /agents/revoke` | Removes one grant owned by the signed-in person. |
+| `GET /agents/skill` | Markdown that teaches an agent how to finish Allow after `403`. |
 | `POST /logout` | Ends the browser session. |
+
+Grants are stored in `agent-grants.json` beside the sessions file (on Fly, `/data/agent-grants.json`). Each row names the owner (`provider` and `subject`), the agent public key, a label, and `createdAt`. A missing or corrupt grants file leaves every agent unauthorized and does not stop the process. Browser sign-out does not revoke grants.
 
 The session cookie lasts 400 days. It is marked `Secure` for an `https` issuer and for loopback. For any other `http` issuer it is stored without that mark.
 

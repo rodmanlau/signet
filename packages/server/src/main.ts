@@ -4,9 +4,27 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { getPublicKey } from '@noble/ed25519'
-import '@agenticage/proof'
-import type { ProviderName } from './identity.js'
-import { connectingText, decideAgentProof, decideConnect, destinationName, type LoginSession } from './connect.js'
+import { agentRequestOk } from '@agenticage/proof'
+import { agentSubject, type ProviderName } from './identity.js'
+import {
+  agentAudienceOk,
+  connectingText,
+  decideAgentProof,
+  decideConnect,
+  destinationName,
+  type LoginSession,
+} from './connect.js'
+import {
+  grantsFilePath,
+  isGranted,
+  listForOwner,
+  loadGrants,
+  revokeGrant,
+  upsertGrant,
+  writeGrants,
+  type AgentGrant,
+  type GrantStore,
+} from './grants.js'
 
 export type Exchange = (code: string) => Promise<{ subject: string; label: string }>
 
@@ -64,10 +82,15 @@ type StoredSession = LoginSession & { id: string }
 
 type PendingLogin = {
   provider: ProviderName
-  audience: string
-  returnUrl: string
-  site?: string
   nonce: string
+  exp: number
+} & ({ returnPath: string } | { audience: string; returnUrl: string; site?: string })
+
+type AgentTicket = {
+  id: string
+  publicKey: Uint8Array
+  label: string
+  loopback?: string
   exp: number
 }
 
@@ -82,6 +105,9 @@ type Ctx = {
   testLogin: boolean
   sessionsFile: string
   sessions: Map<string, LoginSession>
+  grantsFile: string
+  grants: GrantStore
+  tickets: Map<string, AgentTicket>
   writing: Promise<void>
   usedNonces: Map<string, true>
 }
@@ -101,6 +127,8 @@ export async function startLogin(
   const sessionsFile = (options.sessionsFile ?? process.env.SIGNET_SESSIONS ?? '').trim()
   if (sessionsFile === '') throw new Error('SIGNET_SESSIONS is required')
   const sessions = await loadSessions(sessionsFile)
+  const grantsFile = grantsFilePath(sessionsFile)
+  const grants = await loadGrants(grantsFile)
   // Sync getPublicKey needs SHA-512. Importing @agenticage/proof wires it.
   const derived = getPublicKey(options.privateKey)
   if (options.publicKey && !sameBytes(options.publicKey, derived)) {
@@ -117,6 +145,9 @@ export async function startLogin(
     testLogin: options.testLogin ?? process.env.SIGNET_TEST === '1',
     sessionsFile,
     sessions,
+    grantsFile,
+    grants,
+    tickets: new Map(),
     writing: Promise.resolve(),
     usedNonces: new Map(),
   }
@@ -159,6 +190,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (path === '/logout') return await handleLogout(req, res, ctx)
     if (path === '/test-login') return await handleTestLogin(req, res, ctx, url)
     if (path === '/agent-proof') return await handleAgentProof(req, res, ctx)
+    if (path === '/agents') return await handleAgents(req, res, ctx)
+    if (path === '/agents/ticket') return await handleAgentTicket(req, res, ctx)
+    if (path === '/agents/approve') return await handleAgentApprove(req, res, ctx, url)
+    if (path === '/agents/revoke') return await handleAgentRevoke(req, res, ctx)
+    if (path === '/agents/skill') return handleAgentSkill(req, res)
     const auth = /^\/auth\/(google|apple|facebook)$/.exec(path)
     if (auth && isProvider(auth[1])) return handleAuth(req, res, ctx, url, auth[1])
     const callback = /^\/auth\/(google|apple|facebook)\/callback$/.exec(path)
@@ -296,7 +332,16 @@ async function handleTestLogin(req: IncomingMessage, res: ServerResponse, ctx: C
   if (req.method !== 'POST') return sendText(res, 405, 'method not allowed', { allow: 'POST' })
   const session = await readTestSession(req)
   if (!session) return sendText(res, 400, 'bad request')
+  const hasNext = url.searchParams.has('next')
   const named = url.searchParams.has('audience') || url.searchParams.has('return') || url.searchParams.has('site')
+  if (hasNext && named) return sendText(res, 400, 'rejected')
+  if (hasNext) {
+    const returnPath = agentReturnPath(ctx.issuer, url.searchParams.get('next') ?? '')
+    if (!returnPath) return sendText(res, 400, 'rejected')
+    const previous = readSession(ctx, req.headers.cookie)
+    sendRedirect(res, 303, `${ctx.issuer}${returnPath}`, 'signed-in', [await issueSession(ctx, session, previous?.id)])
+    return
+  }
   const query = connectQuery(url)
   // No audience, return, or site mints a session. A present but unusable query must not.
   if (named && !query) return sendText(res, 400, 'rejected')
@@ -371,8 +416,13 @@ async function handleAgentProof(req: IncomingMessage, res: ServerResponse, ctx: 
     keyId: ctx.keyId,
     privateKey: ctx.privateKey,
     derivationKey: ctx.derivationKey,
+    granted: isGranted(ctx.grants, body.publicKey),
   })
   if (decision.type === 'reject') return sendText(res, 400, 'rejected')
+  if (decision.type === 'unauthorized') {
+    const payload = JSON.stringify({ error: 'unauthorized', skill: `${ctx.issuer}/agents/skill` })
+    return sendText(res, 403, payload, { 'content-type': 'application/json; charset=utf-8' })
+  }
   const proof = Buffer.from(decision.proof).toString('base64url')
   sendText(res, 200, JSON.stringify({ proof }), { 'content-type': 'application/json; charset=utf-8' })
 }
@@ -404,32 +454,283 @@ function base64urlBytes(value: unknown, length: number): Uint8Array | null {
   return bytes
 }
 
+async function handleAgentTicket(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
+  if (req.method !== 'POST') return sendText(res, 405, 'method not allowed', { allow: 'POST' })
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await readBody(req))
+  } catch (error) {
+    if (error instanceof HttpError) throw error
+    return sendText(res, 400, 'rejected')
+  }
+  const body = ticketBody(parsed)
+  if (!body) return sendText(res, 400, 'rejected')
+  if (!agentRequestOk(body.audience, body.publicKey, body.issuedAt, body.signature, ctx.now())) {
+    return sendText(res, 400, 'rejected')
+  }
+  if (!agentAudienceOk(body.audience)) return sendText(res, 400, 'rejected')
+  const ticket: AgentTicket = {
+    id: randomBytes(16).toString('base64url'),
+    publicKey: Uint8Array.from(body.publicKey),
+    label: body.label,
+    exp: ctx.now() + OAUTH_SECONDS,
+  }
+  if (body.loopback !== undefined) ticket.loopback = body.loopback
+  rememberTicket(ctx, ticket)
+  const approveUrl = `${ctx.issuer}${approvePath(ticket.id)}`
+  const payload = JSON.stringify({ ticket: ticket.id, approveUrl })
+  sendText(res, 200, payload, { 'content-type': 'application/json; charset=utf-8' })
+}
+
+function ticketBody(parsed: unknown): {
+  audience: string
+  publicKey: Uint8Array
+  issuedAt: number
+  signature: Uint8Array
+  label: string
+  loopback?: string
+} | null {
+  const proof = agentProofBody(parsed)
+  if (!proof || typeof parsed !== 'object' || parsed === null) return null
+  const label = 'label' in parsed ? parsed.label : undefined
+  if (!validLabel(label)) return null
+  if (!('loopback' in parsed) || parsed.loopback === undefined) return { ...proof, label }
+  const loopback = loopbackOrigin(parsed.loopback)
+  if (!loopback) return null
+  return { ...proof, label, loopback }
+}
+
+function validLabel(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= LIMIT.label && !/[\r\n\0]/.test(value)
+}
+
+function loopbackOrigin(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 200) return null
+  if (/[\r\n\0\\\s]/.test(value)) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:') return null
+  if (url.username !== '' || url.password !== '') return null
+  if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') return null
+  if (url.port === '') return null
+  const port = Number(url.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') return null
+  const origin = `http://${url.hostname}:${port}`
+  if (url.origin !== origin) return null
+  if (value !== origin && value !== `${origin}/`) return null
+  return origin
+}
+
+async function handleAgentApprove(req: IncomingMessage, res: ServerResponse, ctx: Ctx, url: URL): Promise<void> {
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    return sendText(res, 405, 'method not allowed', { allow: 'GET, POST' })
+  }
+  const id = ticketId(url.searchParams.get('ticket'))
+  if (!id) return sendText(res, 400, 'rejected')
+  const ticket = liveTicket(ctx, id)
+  if (!ticket) return sendText(res, 400, 'rejected')
+  const session = readSession(ctx, req.headers.cookie)
+  if (req.method === 'GET') {
+    if (!session) {
+      const intro = `To authorize an agent labeled ${ticket.label}, ${fingerprint(ticket.publicKey)}, choose an account.`
+      sendHtml(res, 200, agentSignInPage(ctx, approvePath(ticket.id), intro))
+      return
+    }
+    sendHtml(res, 200, allowPage(ticket))
+    return
+  }
+  if (!session) return sendText(res, 400, 'rejected')
+  const grant: AgentGrant = {
+    ownerProvider: session.provider,
+    ownerSubject: session.subject,
+    publicKey: ticket.publicKey,
+    label: ticket.label,
+    createdAt: ctx.now(),
+  }
+  const existing = ctx.grants.get(agentSubject(ticket.publicKey))
+  if (
+    existing &&
+    (existing.ownerProvider !== grant.ownerProvider || existing.ownerSubject !== grant.ownerSubject)
+  ) {
+    return sendText(res, 409, 'already allowed')
+  }
+  if (!(await commitGrant(ctx, grant))) return sendText(res, 400, 'rejected')
+  ctx.tickets.delete(ticket.id)
+  if (ticket.loopback !== undefined) {
+    sendRedirect(res, 303, `${ticket.loopback}/#signet-agent=allowed`, 'allowed')
+    return
+  }
+  sendHtml(res, 200, allowedPage(ticket.label))
+}
+
+async function handleAgents(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
+  if (req.method !== 'GET') return sendText(res, 405, 'method not allowed', { allow: 'GET' })
+  const session = readSession(ctx, req.headers.cookie)
+  if (!session) {
+    sendHtml(res, 200, agentSignInPage(ctx, '/agents', 'To see your agents, choose an account.'))
+    return
+  }
+  sendHtml(res, 200, agentsPage(listForOwner(ctx.grants, session.provider, session.subject)))
+}
+
+async function handleAgentRevoke(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
+  if (req.method !== 'POST') return sendText(res, 405, 'method not allowed', { allow: 'POST' })
+  const session = readSession(ctx, req.headers.cookie)
+  if (!session) return sendText(res, 400, 'rejected')
+  const publicKey = await readRevokeKey(req)
+  if (!publicKey) return sendText(res, 400, 'rejected')
+  await commitRevoke(ctx, session.provider, session.subject, publicKey)
+  sendRedirect(res, 303, '/agents', 'revoked')
+}
+
+async function readRevokeKey(req: IncomingMessage): Promise<Uint8Array | null> {
+  let raw: string
+  try {
+    raw = await readBody(req)
+  } catch (error) {
+    if (error instanceof HttpError) throw error
+    return null
+  }
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      if (typeof parsed !== 'object' || parsed === null) return null
+      const publicKey = 'publicKey' in parsed ? parsed.publicKey : undefined
+      return base64urlBytes(publicKey, 32)
+    } catch {
+      return null
+    }
+  }
+  return base64urlBytes(new URLSearchParams(raw).get('publicKey'), 32)
+}
+
+function handleAgentSkill(req: IncomingMessage, res: ServerResponse): void {
+  if (req.method !== 'GET') return sendText(res, 405, 'method not allowed', { allow: 'GET' })
+  sendText(res, 200, AGENT_SKILL, { 'content-type': 'text/markdown; charset=utf-8' })
+}
+
+const AGENT_SKILL = `# Allow this agent
+
+Signet returns 403 from POST /agent-proof when this public key has no grant.
+
+POST /agents/ticket with the same JSON fields as POST /agent-proof, and include label. label is 1 to 200 characters and must not contain a line break or a NUL. Include loopback only when you listen on http://127.0.0.1 or http://localhost with an explicit port. Signet rejects any other loopback.
+
+A 200 response carries ticket and approveUrl. Show approveUrl to the person. Allow does not mint a secret. Keep the key you already have.
+
+If you sent loopback, wait until the browser opens that origin with the fragment #signet-agent=allowed. Otherwise poll POST /agent-proof until the status is 200.
+
+Send the person to /agents to revoke a grant. Each row has Revoke.
+`
+
+async function commitGrant(ctx: Ctx, grant: AgentGrant): Promise<boolean> {
+  const key = agentSubject(grant.publicKey)
+  const existing = ctx.grants.get(key)
+  const previous = existing
+    ? {
+        ownerProvider: existing.ownerProvider,
+        ownerSubject: existing.ownerSubject,
+        publicKey: Uint8Array.from(existing.publicKey),
+        label: existing.label,
+        createdAt: existing.createdAt,
+      }
+    : undefined
+  if (!upsertGrant(ctx.grants, grant)) return false
+  try {
+    await persistGrants(ctx)
+  } catch (error) {
+    if (previous) ctx.grants.set(key, previous)
+    else ctx.grants.delete(key)
+    throw error
+  }
+  return true
+}
+
+async function commitRevoke(
+  ctx: Ctx,
+  ownerProvider: ProviderName,
+  ownerSubject: string,
+  publicKey: Uint8Array,
+): Promise<void> {
+  const key = agentSubject(publicKey)
+  const existing = ctx.grants.get(key)
+  if (!existing) return
+  if (existing.ownerProvider !== ownerProvider || existing.ownerSubject !== ownerSubject) return
+  const previous = {
+    ownerProvider: existing.ownerProvider,
+    ownerSubject: existing.ownerSubject,
+    publicKey: Uint8Array.from(existing.publicKey),
+    label: existing.label,
+    createdAt: existing.createdAt,
+  }
+  if (!revokeGrant(ctx.grants, ownerProvider, ownerSubject, publicKey)) return
+  try {
+    await persistGrants(ctx)
+  } catch (error) {
+    ctx.grants.set(key, previous)
+    throw error
+  }
+}
+
+function rememberTicket(ctx: Ctx, ticket: AgentTicket): void {
+  ctx.tickets.set(ticket.id, ticket)
+  while (ctx.tickets.size > 10_000) {
+    const oldest = ctx.tickets.keys().next().value
+    if (oldest === undefined) break
+    ctx.tickets.delete(oldest)
+  }
+}
+
+function liveTicket(ctx: Ctx, id: string): AgentTicket | null {
+  const ticket = ctx.tickets.get(id)
+  if (!ticket) return null
+  if (ticket.exp <= ctx.now()) {
+    ctx.tickets.delete(id)
+    return null
+  }
+  return ticket
+}
+
+function ticketId(value: string | null): string | null {
+  if (!value || !ID_TOKEN.test(value)) return null
+  return value
+}
+
+function approvePath(id: string): string {
+  return `/agents/approve?ticket=${encodeURIComponent(id)}`
+}
+
+function fingerprint(publicKey: Uint8Array): string {
+  const hex = agentSubject(publicKey)
+  return `${hex.slice(0, 8)}...${hex.slice(-8)}`
+}
+
 function handleAuth(req: IncomingMessage, res: ServerResponse, ctx: Ctx, url: URL, provider: ProviderName): void {
   if (req.method !== 'GET') return sendText(res, 405, 'method not allowed', { allow: 'GET' })
   const config = configured(ctx, provider)
   if (!config) return sendText(res, 404, 'not found')
-  const query = connectQuery(url)
-  if (!query) return sendText(res, 400, 'rejected')
-  const decision = decideConnect({
-    session: null,
-    audience: query.audience,
-    returnUrl: query.returnUrl,
-    now: ctx.now(),
-    issuer: ctx.issuer,
-    keyId: ctx.keyId,
-    privateKey: ctx.privateKey,
-    derivationKey: ctx.derivationKey,
-  })
-  if (decision.type === 'reject') return sendText(res, 400, 'rejected')
+  const destination = authDestination(ctx, url)
+  if (!destination) return sendText(res, 400, 'rejected')
   const nonce = randomBytes(16).toString('base64url')
-  const pending: PendingLogin = {
-    provider,
-    audience: query.audience,
-    returnUrl: query.returnUrl,
-    nonce,
-    exp: ctx.now() + OAUTH_SECONDS,
-  }
-  if (query.site !== undefined) pending.site = query.site
+  const exp = ctx.now() + OAUTH_SECONDS
+  const pending: PendingLogin =
+    destination.kind === 'agents'
+      ? { provider, returnPath: destination.returnPath, nonce, exp }
+      : destination.query.site === undefined
+        ? { provider, audience: destination.query.audience, returnUrl: destination.query.returnUrl, nonce, exp }
+        : {
+            provider,
+            audience: destination.query.audience,
+            returnUrl: destination.query.returnUrl,
+            site: destination.query.site,
+            nonce,
+            exp,
+          }
   const state = seal(ctx.derivationKey, OAUTH_DOMAIN, JSON.stringify(pending))
   const prompt = url.searchParams.get('prompt') === 'select_account' ? 'select_account' : undefined
   const location = authorizeLocation(
@@ -468,17 +769,33 @@ async function handleCallback(
   remember(ctx.usedNonces, pending.nonce)
   const code = params.get('code') ?? ''
   const failed = params.get('error')
-  if (failed || code.length === 0 || code.length > LIMIT.code) return failLogin(res, pending)
+  if (failed || code.length === 0 || code.length > LIMIT.code) return failLogin(res, ctx.issuer, pending)
   let result: { subject: string; label: string }
   try {
     result = await config.exchange(code)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     process.stderr.write(`login exchange failed: ${message}\n`)
-    return failLogin(res, pending)
+    return failLogin(res, ctx.issuer, pending)
   }
   const session = { provider, subject: result.subject, label: result.label }
-  if (!validSession(session)) return failLogin(res, pending)
+  if (!validSession(session)) return failLogin(res, ctx.issuer, pending)
+  const previous = readSession(ctx, req.headers.cookie)
+  const prior = readCookie(req.headers.cookie, PRIOR_COOKIE)
+  const drop: string[] = []
+  if (previous) drop.push(previous.id)
+  if (prior !== undefined && ID_TOKEN.test(prior) && !drop.includes(prior)) drop.push(prior)
+  const settled = [
+    clearCookie(OAUTH_COOKIE, OAUTH_FLAGS),
+    clearCookie(PRIOR_COOKIE, OAUTH_FLAGS),
+  ]
+  if ('returnPath' in pending) {
+    sendRedirect(res, 303, `${ctx.issuer}${pending.returnPath}`, 'signed-in', [
+      await issueSession(ctx, session, drop),
+      ...settled,
+    ])
+    return
+  }
   const decision = decideConnect({
     session,
     audience: pending.audience,
@@ -489,22 +806,17 @@ async function handleCallback(
     privateKey: ctx.privateKey,
     derivationKey: ctx.derivationKey,
   })
-  if (decision.type !== 'redirect') return failLogin(res, pending)
-  const previous = readSession(ctx, req.headers.cookie)
-  const prior = readCookie(req.headers.cookie, PRIOR_COOKIE)
-  const drop: string[] = []
-  if (previous) drop.push(previous.id)
-  if (prior !== undefined && ID_TOKEN.test(prior) && !drop.includes(prior)) drop.push(prior)
+  if (decision.type !== 'redirect') return failLogin(res, ctx.issuer, pending)
   const text = connectingText(pending.audience, session.label, pending.site)
-  sendHtml(res, 200, connectingPage(text, decision.location), [
-    await issueSession(ctx, session, drop),
-    clearCookie(OAUTH_COOKIE, OAUTH_FLAGS),
-    clearCookie(PRIOR_COOKIE, OAUTH_FLAGS),
-  ])
+  sendHtml(res, 200, connectingPage(text, decision.location), [await issueSession(ctx, session, drop), ...settled])
 }
 
-function failLogin(res: ServerResponse, pending: PendingLogin): void {
+function failLogin(res: ServerResponse, issuer: string, pending: PendingLogin): void {
   const prior = clearCookie(PRIOR_COOKIE, OAUTH_FLAGS)
+  if ('returnPath' in pending) {
+    sendRedirect(res, 303, `${issuer}${pending.returnPath}`, 'failed', [clearCookie(OAUTH_COOKIE, OAUTH_FLAGS), prior])
+    return
+  }
   let location: string
   try {
     const url = new URL(pending.returnUrl)
@@ -519,6 +831,48 @@ function failLogin(res: ServerResponse, pending: PendingLogin): void {
     return
   }
   sendRedirect(res, 303, location, 'failed', [clearCookie(OAUTH_COOKIE, OAUTH_FLAGS), prior])
+}
+
+function authDestination(ctx: Ctx, url: URL): { kind: 'agents'; returnPath: string } | { kind: 'site'; query: ConnectQuery } | null {
+  const hasNext = url.searchParams.has('next')
+  const hasSite = url.searchParams.has('audience') || url.searchParams.has('return') || url.searchParams.has('site')
+  if (hasNext) {
+    if (hasSite) return null
+    const returnPath = agentReturnPath(ctx.issuer, url.searchParams.get('next') ?? '')
+    if (!returnPath) return null
+    return { kind: 'agents', returnPath }
+  }
+  const query = connectQuery(url)
+  if (!query) return null
+  const decision = decideConnect({
+    session: null,
+    audience: query.audience,
+    returnUrl: query.returnUrl,
+    now: ctx.now(),
+    issuer: ctx.issuer,
+    keyId: ctx.keyId,
+    privateKey: ctx.privateKey,
+    derivationKey: ctx.derivationKey,
+  })
+  if (decision.type === 'reject') return null
+  return { kind: 'site', query }
+}
+
+function agentReturnPath(issuer: string, value: string): string | null {
+  if (value.length === 0 || value.length > LIMIT.returnUrl) return null
+  if (/[\r\n\0\\\s]/.test(value)) return null
+  let url: URL
+  try {
+    url = new URL(value, issuer)
+  } catch {
+    return null
+  }
+  if (url.origin !== issuer || url.username !== '' || url.password !== '') return null
+  if (url.hash !== '') return null
+  if (url.pathname !== '/agents' && !url.pathname.startsWith('/agents/')) return null
+  const canonical = `${url.pathname}${url.search}`
+  if (canonical.length > LIMIT.returnUrl || /[\r\n\0]/.test(canonical)) return null
+  return canonical
 }
 
 function connectQuery(url: URL): ConnectQuery | null {
@@ -577,6 +931,65 @@ function providersPage(ctx: Ctx, query: ConnectQuery): string {
         ? `<h1>Sign in</h1>${test}`
         : `<h1>Sign in</h1><p>To continue to ${escapeHtml(destinationName(query.audience, query.site))}, choose an account. You sign in on that site, then come back here.</p><div class="accounts">${buttons}</div>${test}`
   return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Sign in</title><style>${ACCOUNT_STYLE}</style>${body}</html>`
+}
+
+function agentSignInPage(ctx: Ctx, returnPath: string, intro: string): string {
+  const next = `next=${encodeURIComponent(returnPath)}`
+  const buttons = PROVIDERS.flatMap((provider) => {
+    if (!configured(ctx, provider)) return []
+    const href = escapeHtml(`/auth/${provider}?${next}`)
+    const label = escapeHtml(`Continue with ${NAMES[provider]}`)
+    const mark = provider === 'apple' ? '40' : '20'
+    return [
+      `<a class="account" href="${href}"><img class="${provider}" src="/marks/${provider}.svg" alt="" width="${mark}" height="${mark}">${label}</a>`,
+    ]
+  }).join('')
+  const test = ctx.testLogin
+    ? `<form method="post" action="${escapeHtml(`/test-login?${next}`)}"><button type="submit">Sign in</button></form>`
+    : ''
+  const text = `<p>${escapeHtml(intro)}</p>`
+  const body =
+    buttons.length === 0 && !ctx.testLogin
+      ? `<h1>Sign in</h1>${text}<p>Sign-in is not set up.</p><p>no-provider</p>`
+      : buttons.length === 0
+        ? `<h1>Sign in</h1>${text}${test}`
+        : `<h1>Sign in</h1>${text}<div class="accounts">${buttons}</div>${test}`
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Sign in</title><style>${ACCOUNT_STYLE}</style>${body}</html>`
+}
+
+function allowPage(ticket: AgentTicket): string {
+  const action = escapeHtml(approvePath(ticket.id))
+  const label = escapeHtml(ticket.label)
+  const key = escapeHtml(fingerprint(ticket.publicKey))
+  return (
+    '<!doctype html><html lang="en"><meta charset="utf-8"><title>Allow agent</title><h1>Allow agent</h1>' +
+    `<p>Allow ${label}, ${key}.</p>` +
+    `<form method="post" action="${action}"><button type="submit">Allow</button></form></html>`
+  )
+}
+
+function allowedPage(label: string): string {
+  return (
+    '<!doctype html><html lang="en"><meta charset="utf-8"><title>Allowed</title><h1>Allowed</h1>' +
+    `<p>Allowed ${escapeHtml(label)}.</p></html>`
+  )
+}
+
+function agentsPage(rows: AgentGrant[]): string {
+  const items = rows
+    .map((grant) => {
+      const label = escapeHtml(grant.label)
+      const key = escapeHtml(fingerprint(grant.publicKey))
+      const wire = escapeHtml(Buffer.from(grant.publicKey).toString('base64url'))
+      return (
+        `<li>${label} <time>${grant.createdAt}</time> ${key} ` +
+        `<form method="post" action="/agents/revoke"><input type="hidden" name="publicKey" value="${wire}">` +
+        '<button type="submit">Revoke</button></form></li>'
+      )
+    })
+    .join('')
+  const list = rows.length === 0 ? '<p>No agents.</p>' : `<ul>${items}</ul>`
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Agents</title><h1>Agents</h1>${list}</html>`
 }
 
 function switchPage(ctx: Ctx, query: ConnectQuery, label: string): string {
@@ -767,6 +1180,15 @@ async function persist(ctx: Ctx): Promise<void> {
   await run
 }
 
+async function persistGrants(ctx: Ctx): Promise<void> {
+  const run = ctx.writing.then(() => writeGrants(ctx.grantsFile, ctx.grants))
+  ctx.writing = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  await run
+}
+
 async function writeSessions(file: string, sessions: Map<string, LoginSession>): Promise<void> {
   const body: Record<string, LoginSession> = {}
   for (const [id, session] of sessions) {
@@ -806,15 +1228,22 @@ function openPending(ctx: Ctx, token: string): PendingLogin | null {
   const nonce = 'nonce' in parsed ? parsed.nonce : undefined
   const exp = 'exp' in parsed ? parsed.exp : undefined
   const site = 'site' in parsed ? parsed.site : undefined
-  if (!isProvider(provider) || typeof audience !== 'string' || typeof returnUrl !== 'string') return null
+  if (!isProvider(provider)) return null
   if (typeof nonce !== 'string' || !ID_TOKEN.test(nonce) || typeof exp !== 'number' || !Number.isInteger(exp)) return null
   if (exp <= ctx.now()) return null
+  const returnPathRaw = 'returnPath' in parsed ? parsed.returnPath : undefined
+  if (returnPathRaw !== undefined) {
+    if (audience !== undefined || returnUrl !== undefined || site !== undefined) return null
+    if (typeof returnPathRaw !== 'string') return null
+    const returnPath = agentReturnPath(ctx.issuer, returnPathRaw)
+    if (returnPath !== returnPathRaw) return null
+    return { provider, nonce, exp, returnPath }
+  }
+  if (typeof audience !== 'string' || typeof returnUrl !== 'string') return null
   if (audience.length > LIMIT.audience || returnUrl.length > LIMIT.returnUrl) return null
-  const pending: PendingLogin = { provider, audience, returnUrl, nonce, exp }
-  if (site === undefined) return pending
+  if (site === undefined) return { provider, audience, returnUrl, nonce, exp }
   if (typeof site !== 'string' || site.length > LIMIT.site) return null
-  pending.site = site
-  return pending
+  return { provider, audience, returnUrl, site, nonce, exp }
 }
 
 function validSession(value: {

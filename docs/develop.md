@@ -64,20 +64,26 @@ A proof the site already holds stays valid until it expires. Signet does not tel
 
 ## Ask from an agent
 
-The agent holds its own key and sends `POST /agent-proof`, signed with that key. Signet stores nothing about the agent. `signAgentRequest` builds the request. `agentRequestOk` checks one.
+The agent holds its own key and sends `POST /agent-proof`, signed with that key. `signAgentRequest` builds the request. `agentRequestOk` checks one.
+
+A key that is not on the person's grant list receives `403` with JSON `{ "error": "unauthorized", "skill": "<issuer>/agents/skill" }`. The skill text explains the next step. The agent then posts `POST /agents/ticket` with the same signed fields, a `label`, and an optional loopback origin (`http://127.0.0.1:<port>` or `http://localhost:<port>` only). The response includes an `approveUrl`. A signed-in person opens that URL and clicks Allow. That grants the agent's existing public key. Signet does not mint a new secret.
+
+After Allow, a loopback ticket redirects to `{loopback}/#signet-agent=allowed`. Without loopback, the agent polls `POST /agent-proof` until it is `200`. Revoke is `GET /agents` while signed in, or an agent-led revoke URL for the same key. Revoke stops the next mint. A proof a site already holds stays valid until it expires.
 
 `signProof` is how the Signet process signs. Callers do not sign proofs.
 
 ## Reference client
 
-The client asks for one proof and prints each step. It does not print the agent secret or the proof bytes.
+The client prints each step. It does not print the agent secret or the proof bytes.
 
 ```text
-npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file>
+npm start -w @agenticage/client -- --agent <signet-origin> <audience> <agent-key-file> <public-key-file> [--label <name>]
 npm start -w @agenticage/client -- --human <signet-origin> <audience> <public-key-file>
 npm start -w @agenticage/client -- --sign-out <signet-origin> <audience>
 npm start -w @agenticage/client -- --switch <signet-origin> <audience> <public-key-file>
 ```
+
+A granted key gets a proof from the first `POST /agent-proof`. When that response is 403 and the JSON error is `unauthorized`, the client prints the `skill` URL from the body. It listens on `127.0.0.1` and prints an approve URL. The label defaults to `signet-client`. `--label` sets another name. After Allow, the browser opens that listener with `#signet-agent=allowed`. The client then requests the proof again.
 
 `--human` listens on the audience. The audience must be `http://127.0.0.1:<port>` or `http://localhost:<port>`. Any other audience fails before the listen. The log says the proof would be returned to that origin.
 
